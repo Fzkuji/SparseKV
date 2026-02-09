@@ -159,6 +159,9 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--dataset_name", type=str, default="allenai/c4")
     parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--objective_type", type=str, default=None,
+                        choices=["standard_lm", "reconstruction", "sparse_lm", "mixed"],
+                        help="Training objective type")
 
     args = parser.parse_args()
 

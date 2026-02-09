@@ -122,24 +122,72 @@ class AdaSparseTrainer(Trainer):
         if labels is None:
             labels = inputs["input_ids"].clone()
 
-        # Forward with press (hooks handle the dropout)
-        with self.press(model):
-            # Need use_cache=True for the press hooks to have KV cache to modify
-            outputs = model(
-                **inputs,
-                use_cache=True,
-                past_key_values=DynamicCache(),
-                output_attentions=getattr(self.args, "output_attentions", False),
-            )
+        objective_type = getattr(self.args, "objective_type", "standard_lm") or "standard_lm"
 
-        logits = outputs.logits
-
-        # Compute loss based on objective type
-        loss = self._compute_objective_loss(logits, labels)
+        if objective_type == "reconstruction":
+            loss, outputs = self._compute_reconstruction_loss(model, inputs, labels)
+        else:
+            # Forward with press (hooks handle the dropout)
+            with self.press(model):
+                outputs = model(
+                    **inputs,
+                    use_cache=True,
+                    past_key_values=DynamicCache(),
+                    output_attentions=getattr(self.args, "output_attentions", False),
+                )
+            loss = self._compute_objective_loss(outputs.logits, labels)
 
         if return_outputs:
             return loss, outputs
         return loss
+
+    def _compute_reconstruction_loss(
+        self,
+        model: PreTrainedModel,
+        inputs: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+    ):
+        """
+        Reconstruction objective:
+        1. Forward WITHOUT dropout → get full hidden states (detached, no grad)
+        2. Forward WITH dropout → get sparse hidden states
+        3. Loss = LM loss + MSE(sparse_hidden, full_hidden)
+        """
+        import torch.nn.functional as F
+
+        # Step 1: full forward (no dropout, no grad)
+        with torch.no_grad():
+            full_outputs = model(**inputs, output_hidden_states=True)
+            full_hidden = full_outputs.hidden_states[-1].detach()  # last layer
+
+        # Step 2: forward with dropout
+        with self.press(model):
+            sparse_outputs = model(
+                **inputs,
+                use_cache=True,
+                past_key_values=DynamicCache(),
+                output_hidden_states=True,
+            )
+
+        sparse_hidden = sparse_outputs.hidden_states[-1]
+        logits = sparse_outputs.logits
+
+        # LM loss
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        lm_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
+        # Reconstruction loss
+        recon_weight = getattr(self.args, "recon_weight", 0.1) or 0.1
+        recon_loss = F.mse_loss(sparse_hidden, full_hidden)
+
+        total_loss = lm_loss + recon_weight * recon_loss
+
+        return total_loss, sparse_outputs
 
     def _compute_objective_loss(
         self,
