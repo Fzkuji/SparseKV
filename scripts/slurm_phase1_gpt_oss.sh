@@ -11,7 +11,7 @@ conda activate adasparse
 cd ~/kvpress/evaluation
 
 MODEL="openai/gpt-oss-20b"
-GPU="0"
+GPU="0,1"  # NVLink pair
 OUTPUT_DIR="./results/phase1_gpt_oss"
 
 echo "===== Baseline: $MODEL ====="

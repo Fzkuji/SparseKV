@@ -12,7 +12,7 @@ cd ~/kvpress/evaluation
 
 MODEL="Qwen/Qwen3-8B"
 OUTPUT_DIR="./results/phase1_qwen3_8b"
-GPU="0"
+GPU="0,1"  # NVLink pair
 
 echo "===== Baseline: $MODEL ====="
 
