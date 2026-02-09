@@ -1,0 +1,20 @@
+# Full evaluation: compare trained model vs baseline with all eviction methods
+model_path: ./output/block_dropout_8b
+baseline_model: meta-llama/Llama-3.1-8B-Instruct
+
+press_names:
+  - snapkv
+  - expected_attention
+  - streaming_llm
+  - knorm
+  - observed_attention
+  - random
+
+compression_ratios:
+  - 0.3
+  - 0.5
+  - 0.7
+
+eval_sparsity: true
+output_dir: ./eval_output/full_eval
+device: auto

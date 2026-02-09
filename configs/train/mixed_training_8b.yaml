@@ -1,0 +1,41 @@
+# Mixed training: block dropout + sparsity regularization + reconstruction
+model:
+  name_or_path: meta-llama/Llama-3.1-8B-Instruct
+  dtype: bfloat16
+
+press:
+  press_type: block_dropout
+  block_size: 64
+  drop_ratio: 0.3
+  protect_start: 4
+  protect_recent: 64
+
+  # Sparsity regularization
+  sparse_reg_weight: 0.01
+  sparse_reg_type: entropy
+
+  # Mixed objective weights
+  objective_type: mixed
+  lm_weight: 1.0
+  sparse_lm_weight: 0.5
+  recon_weight: 0.1
+
+curriculum:
+  use_curriculum: true
+  curriculum_type: linear
+  curriculum_start_ratio: 0.0
+  curriculum_end_ratio: 0.5
+  curriculum_warmup_steps: 1000
+
+training:
+  output_dir: ./output/mixed_training_8b
+  learning_rate: 1e-5
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 8
+  max_seq_length: 4096
+  warmup_steps: 200
+  output_attentions: true
+  dataset_name: allenai/c4
+  streaming: true
+  report_to: tensorboard

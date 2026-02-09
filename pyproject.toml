@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "adasparse"
+version = "0.1.0"
+description = "AdaSparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "AdaSparseKV Team" }
+]
+keywords = ["LLM", "KV Cache", "Eviction", "Sparse Attention", "Dropout"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.2.0",
+    "transformers>=4.44.0",
+    "kvpress>=0.1.0",
+    "datasets>=2.14.0",
+    "accelerate>=0.25.0",
+    "pyyaml>=6.0",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+eval = [
+    "lm-eval>=0.4.0",
+    "rouge-score",
+    "nltk",
+]
+vis = [
+    "matplotlib",
+    "seaborn",
+]
+dev = [
+    "pytest",
+    "ruff",
+    "pre-commit",
+]
+all = ["adasparse[eval,vis,dev]"]
+
+[project.scripts]
+adasparse-train = "adasparse.training.train:main"
+adasparse-eval = "adasparse.evaluation.evaluate:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["adasparse"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
