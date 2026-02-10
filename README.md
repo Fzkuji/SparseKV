@@ -1,219 +1,210 @@
-<p align="center">
-  <h1 align="center">SparseKV</h1>
-  <p align="center"><b>Adaptive Block Dropout Training for Robust KV Cache Eviction</b></p>
-</p>
+# SparseKV
 
-<p align="center">
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
-  <a href="https://github.com/NVIDIA/kvpress"><img src="https://img.shields.io/badge/built%20on-kvpress-green.svg" alt="kvpress"></a>
-</p>
+**Anchor-Aware Training for Zero-Cost KV Cache Eviction**
 
----
+Train LLMs to concentrate attention on *anchor tokens* (punctuation, sink, recent), so at inference time you only keep anchor tokens' KV cache — achieving effective compression with zero runtime eviction cost.
 
-Deploying LLMs with long contexts requires KV cache eviction — but current methods assume that a fixed subset of tokens remains important throughout generation. **This assumption is fragile** ([DefensiveKV, 2025](https://arxiv.org/abs/2510.13334)).
-
-**SparseKV** takes a different approach: instead of building better eviction heuristics, we **train the model itself** to have sparser attention patterns, so that *any* eviction method works better.
-
-## 💡 Key Idea
+## Method
 
 ```
-Training with block-wise KV cache dropout
-  → Model learns to concentrate attention on fewer, more important tokens
-    → Inference-time eviction is safer (deleted tokens truly don't matter)
-      → Works with ANY eviction method (SnapKV, H2O, StreamingLLM, ...)
+┌─────────────────────────────────────────────────────┐
+│                    Training                          │
+│                                                      │
+│  Input: [The] [cat] [sat] [on] [the] [mat] [.]     │
+│                                              ↑anchor │
+│                                                      │
+│  Teacher (frozen, full attention):                   │
+│    → teacher_logits                                  │
+│                                                      │
+│  Student (LoRA, KV dropout mask):                    │
+│    keep_ratio: 0.9 → 0.7 → 0.5 → 0.3 (curriculum)  │
+│    anchor tokens: ALWAYS kept                        │
+│    non-anchor: randomly dropped (increasing rate)    │
+│    → student_logits                                  │
+│                                                      │
+│  Loss = CE(student, labels) + λ·KL(teacher, student) │
+└─────────────────────────────────────────────────────┘
+                         ↓
+┌─────────────────────────────────────────────────────┐
+│                   Inference                          │
+│                                                      │
+│  Only keep anchor tokens' KV cache                   │
+│  → Zero-cost eviction (no scoring, no selection)     │
+│  → Performance comparable to full cache              │
+└─────────────────────────────────────────────────────┘
 ```
 
-## 🔧 Installation
+**Key insight**: Instead of building smarter eviction algorithms, we train the model to not need the evicted tokens in the first place.
+
+## Installation
 
 ```bash
+# Clone
+git clone https://github.com/Fzkuji/SparseKV.git
+cd SparseKV
+
+# Install
 pip install -e .
 
-# With evaluation dependencies:
-pip install -e ".[eval]"
-
-# With visualization:
-pip install -e ".[vis]"
-
-# Everything:
-pip install -e ".[all]"
+# Dependencies
+pip install flash-attn --no-cache-dir --no-build-isolation  # Optional, for teacher model
+pip install peft datasets  # For training
 ```
 
-## 🚀 Quick Start
-
-### Training with Block Dropout
+## Quick Start
 
 ```python
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from sparsekv import BlockDropoutPress
-from sparsekv.training import SparseKVTrainer, LinearCurriculum
+from sparsekv.training import SparseKVTrainer, TrainConfig
 
-model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
-
-# Create press — drops 30% of KV cache blocks during training
-press = BlockDropoutPress(block_size=64, drop_ratio=0.3, protect_start=4, protect_recent=64)
-
-# Gradually increase dropout ratio
-curriculum = LinearCurriculum(start_ratio=0.0, end_ratio=0.5, warmup_steps=1000)
-
-trainer = SparseKVTrainer(
-    press=press,
-    curriculum=curriculum,
-    model=model,
-    args=TrainingArguments(output_dir="./output", learning_rate=1e-5, num_train_epochs=1),
-    train_dataset=dataset,
-    tokenizer=tokenizer,
+config = TrainConfig(
+    model_name="Qwen/Qwen3-8B",
+    output_dir="./output/qwen3_sparsekv",
 )
-trainer.train()
+trainer = SparseKVTrainer(config)
+# ... see scripts/train_sparsekv.py for full example
 ```
 
-### Evaluation with kvpress
+## Complete Experiment Workflow
 
-```python
-from transformers import pipeline
-from kvpress import SnapKVPress, ExpectedAttentionPress
-
-# Load your trained model
-pipe = pipeline("kv-press-text-generation", model="./output", device_map="auto")
-
-# Test with ANY eviction method — trained model should be more robust
-for press in [SnapKVPress(compression_ratio=0.5), ExpectedAttentionPress(compression_ratio=0.5)]:
-    result = pipe(context, question=question, press=press)
-    print(result["answer"])
-```
-
-### CLI Training
+### Prerequisites
 
 ```bash
-# Quick iteration on small model
-sparsekv-train --config configs/train/block_dropout_1b.yaml
-
-# Full training
-sparsekv-train --config configs/train/adaptive_dropout_8b.yaml
-
-# Evaluation
-sparsekv-eval --config configs/eval/full_eval.yaml
+# On your GPU server
+conda activate adasparse   # or your conda env
+cd ~/SparseKV
+pip install -e .
 ```
 
-## 📦 Available Methods
+### Phase 0: Attention Pattern Analysis
 
-### Training Presses
+Discover which tokens/positions naturally receive more attention.
 
-| Press | Description | Key Feature |
-|-------|-------------|-------------|
-| `BlockDropoutPress` | Fixed-size block dropout | Simple, effective baseline |
-| `AdaptiveBlockDropoutPress` | Attention-density-aware dropout | ⭐ Drops unimportant blocks more aggressively |
-| `VariableBlockDropoutPress` | Variable-length blocks | More diverse dropout patterns |
-| `SentenceDropoutPress` | Sentence-level dropout | Semantically meaningful boundaries |
-| `SoftThresholdPress` | Sigmoid soft masking | Fully differentiable, temperature annealing |
-| `EvictionAugPress` | Existing methods as augmentation | Use SnapKV/H2O during training |
-| `SparseRegPress` | Entropy/L1 regularization | Encourage sparse attention directly |
+```bash
+# Submit analysis job
+sbatch scripts/slurm_phase0_analyze.sh
 
-### Training Objectives
-
-| Objective | Description |
-|-----------|-------------|
-| `StandardLMObjective` | Next-token prediction with dropout (default) |
-| `SparseLMObjective` | LM + sparsity regularization |
-| `ReconstructionObjective` | LM + reconstruct dropped content |
-| `MixedObjective` | Configurable combination of all above |
-
-### Curriculum Schedules
-
-| Schedule | Description |
-|----------|-------------|
-| `LinearCurriculum` | Linear ramp from 0% to target dropout |
-| `StepCurriculum` | Step-wise increase |
-| `CosineCurriculum` | Cosine annealing schedule |
-
-## 📊 Evaluation Metrics
-
-### Sparsity Metrics
-- **Effective Support**: `exp(entropy(attention))` — lower = sparser
-- **Top-K Coverage**: fraction of attention in top-K tokens — higher = sparser
-- **Block Sparsity**: fraction of blocks with negligible attention
-
-### Stability Metrics (DefensiveKV-inspired)
-- **Min Retained Importance**: worst-case attention retention after eviction
-- **Jaccard Stability**: consistency of eviction decisions across generation steps
-- **Flip Rate**: how often tokens switch between retained/evicted
-
-## 🏗️ Architecture
-
-SparseKV is built on [NVIDIA kvpress](https://github.com/NVIDIA/kvpress):
-
-```
-kvpress BasePress (forward hook on attention layers)
-    ↑ inherit
-SparseKV Presses (block dropout, adaptive, soft threshold, ...)
-    ↓ used by
-SparseKVTrainer (HuggingFace Trainer + press integration + curriculum)
-    ↓ evaluated with
-kvpress evaluation (RULER, LongBench, NIAH, ...) + sparsity/stability metrics
+# Check results when done
+cat analysis/attention_analysis_Qwen--Qwen3-8B.json | python -m json.tool | head -50
 ```
 
-All presses use kvpress's hook mechanism: they register a `forward_hook` on each attention layer that automatically modifies the KV cache after the attention computation. **No model code is modified.**
+**Output**: `analysis/attention_analysis_<model>.json` — per-token-type and per-position attention statistics.
 
-## 📂 Project Structure
+### Phase 1: Baseline Evaluation
+
+Evaluate the original (untrained) model with various KV cache eviction methods.
+
+```bash
+# Submit first batch of 4 jobs (Qwen3-8B)
+bash scripts/submit_all.sh qwen3
+
+# Check progress
+squeue -u $(whoami)
+
+# When first 4 finish, submit next 4
+bash scripts/submit_all.sh qwen3
+
+# Repeat until all 52 combinations are done
+# (4 datasets × 13 press configs = 52 jobs)
+
+# Same for Llama
+bash scripts/submit_all.sh llama
+```
+
+**Press methods tested**: no_press, snapkv, streaming_llm, critical_snapkv, kvzip
+**Compression ratios**: 0.3, 0.5, 0.7
+**Benchmarks**: RULER 4k, RULER 16k, LongBench, AIME25
+
+**Output**: `~/kvpress/evaluation/results/phase1_<model>/` — metrics.json + profiling.json per experiment.
+
+### Phase 2: SparseKV Training
+
+Train the model with anchor-aware KV dropout.
+
+```bash
+# Train Qwen3-8B
+sbatch scripts/slurm_phase2_train_qwen.sh
+
+# Train Llama-3.1-8B (after Qwen3 is done, or on a different machine)
+sbatch scripts/slurm_phase2_train_llama.sh
+
+# Monitor training
+tail -f ~/logs/output_<job_id>.txt
+```
+
+**Output**: `./output/<model>_sparsekv/merged/` — merged LoRA model ready for evaluation.
+
+### Phase 3: Evaluate Trained Model
+
+Same evaluation as Phase 1, but with the trained model.
+
+```bash
+# Evaluate trained Qwen3-8B
+bash scripts/submit_all.sh qwen3_trained
+
+# Evaluate trained Llama
+bash scripts/submit_all.sh llama_trained
+```
+
+**Output**: `~/kvpress/evaluation/results/phase1_<model>_trained/`
+
+### Collect All Results
+
+```bash
+# View all results
+find ~/kvpress/evaluation/results/ -name "metrics.json" | while read f; do
+    echo "=== $(basename "$(dirname "$f")") ==="
+    python -c "
+import json
+d=json.load(open('$f'))
+vals=[v.get('string_match', v.get('score', 0)) for v in d.values() if isinstance(v, dict)]
+if vals: print(f'  Avg: {sum(vals)/len(vals):.2f}')
+"
+done
+```
+
+## Project Structure
 
 ```
 SparseKV/
 ├── sparsekv/
-│   ├── presses/           # Training presses (inherit kvpress BasePress)
-│   ├── training/          # Trainer, objectives, curriculum, data
-│   ├── evaluation/        # Sparsity & stability metrics
-│   └── utils/             # Attention analysis & visualization
-├── configs/               # YAML configs for training & evaluation
-├── scripts/               # Shell scripts
-├── tests/                 # Unit tests
-└── notebooks/             # Demo notebooks
+│   ├── training/
+│   │   ├── anchor.py           # Anchor token definition
+│   │   ├── kv_dropout.py       # KV dropout mask creation
+│   │   ├── eit_trainer.py      # Main trainer (teacher-student)
+│   │   ├── scheduler.py        # Compression ratio curriculum
+│   │   └── loss.py             # Loss functions
+│   ├── evaluation/             # Evaluation utilities
+│   └── presses/                # Custom press implementations
+├── scripts/
+│   ├── analyze_attention.py    # Phase 0: attention analysis
+│   ├── train_sparsekv.py       # Phase 2: training launch
+│   ├── submit_all.sh           # Phase 1 & 3: evaluation submission
+│   ├── eval_wrapper.py         # Adds profiling to kvpress evaluation
+│   ├── slurm_phase0_analyze.sh
+│   ├── slurm_phase2_train_qwen.sh
+│   └── slurm_phase2_train_llama.sh
+├── docs/
+│   ├── experiment_plan.md      # Detailed experiment design
+│   └── server_setup.md         # Server configuration guide
+├── configs/                    # YAML configs
+└── analysis/                   # Phase 0 outputs
 ```
 
-## 🔬 Experimental Design
+## Key Design Choices
 
-### Key Experiments
+| Choice | Decision | Rationale |
+|--------|----------|-----------|
+| Two models | Teacher (frozen) + Student (LoRA) | Teacher provides stable target; student learns eviction robustness |
+| Attention impl | Teacher: flash_attn, Student: SDPA | Flash for speed, SDPA for custom 4D mask support |
+| Anchor types | Sink + Recent + Punctuation | These naturally receive high attention (see Phase 0 analysis) |
+| Curriculum | 0.9 → 0.3 keep_ratio | Gradual increase prevents training collapse |
+| LoRA | r=64, target=QKVO | Efficient training, <1% params |
 
-1. **Block Dropout vs No Dropout**: Does training with dropout improve eviction?
-2. **Adaptive vs Fixed**: Does attention-aware dropout help?
-3. **Generalization**: Train with method A, evaluate with method B
-4. **Curriculum**: Effect of gradually increasing dropout
-5. **Sparsity Analysis**: How do attention patterns change?
+## Citation
 
-### Recommended Pipeline
-
-```bash
-# 1. Baseline evaluation
-bash scripts/eval_baseline.sh
-
-# 2. Train with block dropout
-bash scripts/train.sh configs/train/block_dropout_8b.yaml
-
-# 3. Evaluate trained model
-bash scripts/eval_trained.sh ./output/block_dropout_8b
-
-# 4. Train with adaptive dropout
-bash scripts/train.sh configs/train/adaptive_dropout_8b.yaml
-
-# 5. Compare all results
 ```
-
-## 📖 Citation
-
-```bibtex
-@article{sparsekv2026,
-  title={SparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction},
-  author={},
+@misc{sparsekv2026,
+  title={SparseKV: Anchor-Aware Training for Zero-Cost KV Cache Eviction},
   year={2026},
 }
 ```
-
-## 🙏 Acknowledgments
-
-- [NVIDIA kvpress](https://github.com/NVIDIA/kvpress) — KV cache compression framework
-- [DefensiveKV](https://arxiv.org/abs/2510.13334) — stability assumption analysis
-- [DropKey](https://arxiv.org/abs/2208.02646) — attention dropout for ViT (CVPR 2023)
-
-## License
-
-Apache 2.0

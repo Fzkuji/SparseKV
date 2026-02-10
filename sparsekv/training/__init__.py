@@ -1,5 +1,4 @@
-from sparsekv.training.eit_trainer import EITTrainer, EITConfig
-from sparsekv.training.eviction_sim import AttentionScoreEviction, EvictionConfig
-from sparsekv.training.loss import EvictionInvarianceLoss, LossConfig
+from sparsekv.training.anchor import AnchorSelector, AnchorConfig
+from sparsekv.training.kv_dropout import create_kv_dropout_mask, keep_mask_to_4d_attention_mask
 from sparsekv.training.scheduler import CompressionScheduler, SchedulerConfig
-from sparsekv.training.attention_hook import AttentionHook, compute_evicted_attention
+from sparsekv.training.eit_trainer import SparseKVTrainer, TrainConfig

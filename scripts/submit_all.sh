@@ -1,16 +1,21 @@
 #!/bin/bash
-# 提交所有 baseline 评测任务
-# 用法: bash scripts/submit_all.sh [model_key]
-#   model_key: qwen3 (默认), llama, gpt-oss
+# 提交评测任务 (Phase 1 baseline 或 Phase 3 trained model)
+# 用法:
+#   bash scripts/submit_all.sh qwen3              # Phase 1: baseline Qwen3-8B
+#   bash scripts/submit_all.sh llama              # Phase 1: baseline Llama
+#   bash scripts/submit_all.sh qwen3_trained      # Phase 3: trained Qwen3-8B
+#   bash scripts/submit_all.sh llama_trained      # Phase 3: trained Llama
 set -e
 
 MODEL_KEY=${1:-qwen3}
 
 case $MODEL_KEY in
-    qwen3)   MODEL="Qwen/Qwen3-8B" ;;
-    llama)   MODEL="meta-llama/Llama-3.1-8B-Instruct" ;;
-    gpt-oss) MODEL="openai/gpt-oss-20b" ;;
-    *)       MODEL="$MODEL_KEY" ;;
+    qwen3)          MODEL="Qwen/Qwen3-8B" ;;
+    llama)          MODEL="meta-llama/Llama-3.1-8B-Instruct" ;;
+    qwen3_trained)  MODEL="./output/qwen3_sparsekv/merged" ;;
+    llama_trained)  MODEL="./output/llama_sparsekv/merged" ;;
+    gpt-oss)        MODEL="openai/gpt-oss-20b" ;;
+    *)              MODEL="$MODEL_KEY" ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
