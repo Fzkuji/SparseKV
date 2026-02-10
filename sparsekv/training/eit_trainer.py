@@ -36,6 +36,7 @@ from transformers import (
 from sparsekv.training.eviction_sim import AttentionScoreEviction, EvictionConfig
 from sparsekv.training.loss import EvictionInvarianceLoss, LossConfig
 from sparsekv.training.scheduler import CompressionScheduler, SchedulerConfig
+from sparsekv.training.attention_hook import AttentionHook, compute_evicted_attention
 
 logger = logging.getLogger(__name__)
 
@@ -82,105 +83,6 @@ class EITConfig:
     capture_layers: Optional[list] = None  # None = all layers
 
 
-class AttentionCaptureHook:
-    """
-    Hook to capture attention weights and outputs from transformer layers.
-    
-    Registers forward hooks on attention modules to intercept:
-    - attention weights (for eviction decisions)
-    - attention output (for invariance loss computation)
-    """
-    
-    def __init__(self):
-        self.attention_weights = {}   # layer_idx -> (B, H, L_q, L_kv)
-        self.attention_outputs = {}   # layer_idx -> (B, L, D)
-        self._hooks = []
-    
-    def register(self, model: nn.Module):
-        """Register hooks on all attention layers."""
-        for idx, layer in enumerate(self._get_attention_layers(model)):
-            hook = layer.register_forward_hook(
-                self._make_hook(idx),
-                with_kwargs=True,
-            )
-            self._hooks.append(hook)
-        logger.info(f"Registered attention hooks on {len(self._hooks)} layers")
-    
-    def _get_attention_layers(self, model):
-        """Extract attention modules from the model."""
-        # Support common architectures
-        if hasattr(model, 'model') and hasattr(model.model, 'layers'):
-            # LlamaForCausalLM, QwenForCausalLM, etc.
-            return [layer.self_attn for layer in model.model.layers]
-        elif hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
-            # GPT-2 style
-            return [layer.attn for layer in model.transformer.h]
-        else:
-            raise ValueError(f"Unsupported model architecture: {type(model)}")
-    
-    def _make_hook(self, layer_idx: int):
-        def hook_fn(module, args, kwargs, output):
-            # output is typically (attn_output, attn_weights, past_key_value)
-            # or just attn_output depending on output_attentions flag
-            if isinstance(output, tuple):
-                attn_output = output[0]
-                if len(output) > 1 and output[1] is not None:
-                    self.attention_weights[layer_idx] = output[1].detach()
-            else:
-                attn_output = output
-            
-            self.attention_outputs[layer_idx] = attn_output
-            return output
-        return hook_fn
-    
-    def clear(self):
-        """Clear captured data."""
-        self.attention_weights.clear()
-        self.attention_outputs.clear()
-    
-    def remove(self):
-        """Remove all hooks."""
-        for hook in self._hooks:
-            hook.remove()
-        self._hooks.clear()
-
-
-def compute_evicted_attention(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    mask: torch.Tensor,
-    head_dim: int,
-) -> torch.Tensor:
-    """
-    Compute attention output using only the kept (non-evicted) KV positions.
-    
-    Args:
-        query: (B, H, L_q, D)
-        key: (B, H, L_kv, D)
-        value: (B, H, L_kv, D)
-        mask: (B, H, L_kv) binary mask, True = keep
-        head_dim: dimension per head
-        
-    Returns:
-        attn_output: (B, H, L_q, D)
-    """
-    # Compute attention scores
-    scale = 1.0 / math.sqrt(head_dim)
-    attn_scores = torch.matmul(query, key.transpose(-2, -1)) * scale  # (B, H, L_q, L_kv)
-    
-    # Mask out evicted positions with -inf
-    eviction_mask = ~mask.unsqueeze(2)  # (B, H, 1, L_kv)
-    attn_scores = attn_scores.masked_fill(eviction_mask, float('-inf'))
-    
-    # Softmax and compute output
-    attn_weights = F.softmax(attn_scores, dim=-1)
-    attn_weights = attn_weights.nan_to_num(0.0)  # Handle all-masked rows
-    attn_output = torch.matmul(attn_weights, value)  # (B, H, L_q, D)
-    
-    return attn_output
-
-
 class EITTrainer:
     """
     Main trainer for Eviction-Invariant Training.
@@ -200,9 +102,9 @@ class EITTrainer:
         
         # Initialize EIT modules
         self.eviction_sim = AttentionScoreEviction(config.eviction)
-        
-        num_layers = len(list(self.hook._get_attention_layers(self.model)))
-        self.invariance_loss = EvictionInvarianceLoss(config.loss, num_layers).to(self.device)
+        self.invariance_loss = EvictionInvarianceLoss(
+            config.loss, self.num_layers
+        ).to(self.device)
         
         # Scheduler will be initialized in train() when we know total steps
         self.compression_scheduler = None
@@ -220,15 +122,11 @@ class EITTrainer:
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             torch_dtype=dtype,
-            attn_implementation="eager",  # Need attention weights
+            attn_implementation="eager",  # Need attention weights for capture
             device_map="auto",
         )
         
-        # Register attention hooks
-        self.hook = AttentionCaptureHook()
-        self.hook.register(self.model)
-        
-        # Apply LoRA if configured
+        # Apply LoRA BEFORE patching (so hooks see LoRA-modified projections)
         if self.config.use_lora:
             from peft import get_peft_model, LoraConfig, TaskType
             
@@ -242,69 +140,101 @@ class EITTrainer:
             self.model = get_peft_model(self.model, lora_config)
             self.model.print_trainable_parameters()
         
-        # Enable output_attentions
-        self.model.config.output_attentions = True
+        # Patch attention layers to capture Q, K, V
+        self.hook = AttentionHook(enabled=True)
+        self.hook.patch(self.model)
+        self.num_layers = len(self.hook._get_layers(self.model))
     
     def _compute_eit_loss(
         self,
         keep_ratio: float,
     ) -> tuple[torch.Tensor, dict]:
         """
-        Compute EIT invariance loss using captured attention data.
+        Compute EIT invariance loss using captured Q, K, V from each layer.
         
-        After a forward pass, the hook has captured attention weights and outputs
-        for each layer. This method:
-        1. Uses attention weights to determine eviction masks
-        2. Recomputes attention with evicted KV
-        3. Computes invariance loss between full and evicted outputs
+        For each layer:
+        1. Use captured attention weights to compute eviction mask (AdaKV-style)
+        2. Recompute attention exactly with evicted KV using captured Q, K, V
+        3. Compare full attention output vs evicted attention output
         
         Returns:
             eit_loss: scalar tensor
-            metrics: dict with per-layer losses
+            metrics: dict with per-layer loss values
         """
         full_outputs = []
         evict_outputs = []
         
-        layers = list(self.hook._get_attention_layers(self.model))
-        
-        for l_idx in range(len(layers)):
-            if l_idx not in self.hook.attention_weights:
+        for l_idx in range(self.num_layers):
+            if l_idx not in self.hook.captures:
                 continue
             
-            attn_weights = self.hook.attention_weights[l_idx]  # (B, H, L_q, L_kv)
-            full_out = self.hook.attention_outputs[l_idx]       # (B, L, D) or (B, H, L, D)
+            cap = self.hook.captures[l_idx]
             
-            # Get eviction mask
-            mask = self.eviction_sim(attn_weights, keep_ratio=keep_ratio)  # (B, H, L_kv)
+            # Determine eviction mask using attention weights
+            # If attention weights not available, compute from Q, K
+            if cap.attn_weights is not None:
+                attn_for_eviction = cap.attn_weights  # (B, H_q, L, L)
+                # For GQA: average across query groups to get per-KV-head weights
+                if cap.num_key_value_groups > 1:
+                    B, H_q, L, _ = attn_for_eviction.shape
+                    H_kv = H_q // cap.num_key_value_groups
+                    attn_for_eviction = attn_for_eviction.view(
+                        B, H_kv, cap.num_key_value_groups, L, L
+                    ).mean(dim=2)  # (B, H_kv, L, L)
+            else:
+                # Compute attention weights from Q, K
+                scale = 1.0 / math.sqrt(cap.query.shape[-1])
+                q_for_score = cap.query
+                k_for_score = cap.key
+                # Expand K for GQA
+                if cap.num_key_value_groups > 1:
+                    B, H_kv, L, D = k_for_score.shape
+                    k_expanded = k_for_score.unsqueeze(2).expand(
+                        -1, -1, cap.num_key_value_groups, -1, -1
+                    ).reshape(B, -1, L, D)
+                    scores = torch.matmul(q_for_score, k_expanded.transpose(-2, -1)) * scale
+                    # Average back to H_kv
+                    scores = scores.view(B, H_kv, cap.num_key_value_groups, L, L).mean(dim=2)
+                else:
+                    scores = torch.matmul(q_for_score, k_for_score.transpose(-2, -1)) * scale
+                
+                # Apply causal mask
+                causal = torch.triu(torch.ones(L, L, device=scores.device, dtype=torch.bool), diagonal=1)
+                scores = scores.masked_fill(causal.unsqueeze(0).unsqueeze(0), float('-inf'))
+                attn_for_eviction = F.softmax(scores, dim=-1)
             
-            # Get Q, K, V from the layer (need to access them)
-            layer = layers[l_idx]
-            # Re-extract K, V from the cached key_value in the layer
-            # This depends on model architecture. For now, we use the
-            # attention weights to compute evicted output differently.
+            # Compute eviction mask: (B, H_kv, L)
+            eviction_mask = self.eviction_sim(attn_for_eviction, keep_ratio=keep_ratio)
             
-            # Alternative: use attention weights directly to approximate evicted output
-            # evicted_attn_weights = attn_weights * mask.unsqueeze(2)  # zero out evicted cols
-            # renormalize
-            evicted_weights = attn_weights.clone()
-            eviction_mask = ~mask.unsqueeze(2)  # (B, H, 1, L_kv)
-            evicted_weights = evicted_weights.masked_fill(eviction_mask, 0.0)
-            # Renormalize
-            weight_sum = evicted_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-            evicted_weights = evicted_weights / weight_sum
+            # Recompute attention with evicted KV
+            evict_attn_out = compute_evicted_attention(
+                query=cap.query,
+                key=cap.key,
+                value=cap.value,
+                eviction_mask=eviction_mask,
+                num_kv_groups=cap.num_key_value_groups,
+                causal=True,
+            )  # (B, H_q, L, D)
             
-            # full_out shape handling
-            # Attention output after o_proj is (B, L, D)
-            # We store it as-is from the hook
-            full_outputs.append(full_out.detach())
+            # Reshape evicted output to match full output shape (B, L, H_q * D)
+            B, H_q, L, D = evict_attn_out.shape
+            evict_out_flat = evict_attn_out.transpose(1, 2).reshape(B, L, H_q * D)
             
-            # For evicted output, we need to approximate it
-            # Since we can't easily re-extract V, we use the ratio of weight changes
-            # as a correction factor. This is an approximation.
-            #
-            # Better approach: store Q, K, V in the hook and recompute properly.
-            # TODO: implement full Q/K/V capture for exact evicted attention computation
-            evict_outputs.append(full_out)  # Placeholder - will be replaced with proper impl
+            # Full attention output from hook (B, L, hidden_dim) — after o_proj
+            # We need pre-o_proj full output for fair comparison
+            # Reshape captured Q,K,V full attention for comparison
+            full_attn_out = compute_evicted_attention(
+                query=cap.query,
+                key=cap.key,
+                value=cap.value,
+                eviction_mask=torch.ones_like(eviction_mask),  # Keep all
+                num_kv_groups=cap.num_key_value_groups,
+                causal=True,
+            )
+            full_out_flat = full_attn_out.transpose(1, 2).reshape(B, L, H_q * D)
+            
+            full_outputs.append(full_out_flat)
+            evict_outputs.append(evict_out_flat)
         
         if not full_outputs:
             return torch.tensor(0.0, device=self.device), {}
@@ -351,15 +281,14 @@ class EITTrainer:
                 attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(self.device)
                 labels = input_ids.clone()
                 
-                # Clear hook data
+                # Clear captured data from previous step
                 self.hook.clear()
                 
-                # Forward pass (hooks capture attention data)
+                # Forward pass (patched attention captures Q, K, V per layer)
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     labels=labels,
-                    output_attentions=True,
                 )
                 
                 lm_loss = outputs.loss
