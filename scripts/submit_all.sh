@@ -54,7 +54,7 @@ conda activate adasparse
 
 cd ~/kvpress/evaluation
 
-CUDA_VISIBLE_DEVICES="0,1" python evaluate.py \\
+CUDA_VISIBLE_DEVICES="0,1" python ~/AdaSparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
