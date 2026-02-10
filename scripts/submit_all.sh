@@ -1,48 +1,69 @@
 #!/bin/bash
-# 提交评测任务 (Phase 1 baseline 或 Phase 3 trained model)
-# 用法:
-#   bash scripts/submit_all.sh qwen3              # Phase 1: baseline Qwen3-8B
-#   bash scripts/submit_all.sh llama              # Phase 1: baseline Llama
-#   bash scripts/submit_all.sh qwen3_trained      # Phase 3: trained Qwen3-8B
-#   bash scripts/submit_all.sh llama_trained      # Phase 3: trained Llama
+# Submit baseline or trained-model evaluation jobs.
+#
+# Usage:
+#   bash scripts/submit_all.sh qwen3           # Phase 1: baseline Qwen3-8B
+#   bash scripts/submit_all.sh llama           # Phase 1: baseline Llama
+#   bash scripts/submit_all.sh qwen3_trained   # Phase 3: trained Qwen3-8B
+#   bash scripts/submit_all.sh llama_trained   # Phase 3: trained Llama
 set -e
 
 MODEL_KEY=${1:-qwen3}
 
+# Determine model path and output directory
 case $MODEL_KEY in
-    qwen3)          MODEL="Qwen/Qwen3-8B" ;;
-    llama)          MODEL="meta-llama/Llama-3.1-8B-Instruct" ;;
-    qwen3_trained)  MODEL="./output/qwen3_sparsekv/merged" ;;
-    llama_trained)  MODEL="./output/llama_sparsekv/merged" ;;
-    gpt-oss)        MODEL="openai/gpt-oss-20b" ;;
-    *)              MODEL="$MODEL_KEY" ;;
+    qwen3)
+        MODEL="Qwen/Qwen3-8B"
+        OUTPUT_DIR="./results/phase1_qwen3"
+        ;;
+    llama)
+        MODEL="meta-llama/Llama-3.1-8B-Instruct"
+        OUTPUT_DIR="./results/phase1_llama"
+        ;;
+    qwen3_trained)
+        MODEL="./output/qwen3_sparsekv/final"
+        OUTPUT_DIR="./results/phase3_qwen3"
+        ;;
+    llama_trained)
+        MODEL="./output/llama_sparsekv/final"
+        OUTPUT_DIR="./results/phase3_llama"
+        ;;
+    *)
+        MODEL="$MODEL_KEY"
+        OUTPUT_DIR="./results/custom_${MODEL_KEY}"
+        ;;
 esac
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_DIR="./results/phase1_${MODEL_KEY}"
 
 DATASETS=("ruler:4096" "ruler:16384" "longbench:" "aime25:")
 PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
 
 echo "Model: $MODEL"
-echo "Will submit ${#DATASETS[@]} x ${#PRESSES[@]} = $(( ${#DATASETS[@]} * ${#PRESSES[@]} )) jobs"
+echo "Output: $OUTPUT_DIR"
+echo "Will submit up to 4 jobs (${#DATASETS[@]} datasets x ${#PRESSES[@]} presses = $(( ${#DATASETS[@]} * ${#PRESSES[@]} )) total)"
 echo ""
 
 COUNT=0
 for ds_entry in "${DATASETS[@]}"; do
     DS_NAME="${ds_entry%%:*}"
     DS_DIR="${ds_entry##*:}"
-    
+
     for press_entry in "${PRESSES[@]}"; do
         PRESS="${press_entry%%:*}"
         CR="${press_entry##*:}"
-        
+
         JOB_NAME="${MODEL_KEY}_${DS_NAME}_${PRESS}_${CR}"
-        
-        # 构建 data_dir 参数
+
         DATA_DIR_ARG=""
         if [ -n "$DS_DIR" ]; then
             DATA_DIR_ARG="--data_dir $DS_DIR"
+        fi
+
+        # Skip if already done
+        RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR}"
+        RESULT_PATH="$(cd ~/kvpress/evaluation 2>/dev/null && pwd)/${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
+        if [ -f "$RESULT_PATH" ]; then
+            echo "  [skip] $JOB_NAME (done)"
+            continue
         fi
 
         cat > /tmp/job_${JOB_NAME}.sh << HEREDOC
@@ -55,8 +76,7 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --gres=gpu:2
 #SBATCH --time=12:00:00
 
-conda activate sparsekv
-
+conda activate adasparse
 cd ~/kvpress/evaluation
 
 CUDA_VISIBLE_DEVICES="0,1" python ~/SparseKV/scripts/eval_wrapper.py \\
@@ -64,30 +84,16 @@ CUDA_VISIBLE_DEVICES="0,1" python ~/SparseKV/scripts/eval_wrapper.py \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
     --compression_ratio ${CR} \\
-    \\
     --output_dir ${OUTPUT_DIR}
 HEREDOC
 
-        # 构建结果目录名，跳过已完成的
-        RESULT_NAME="${DS_NAME}__${DS_DIR}__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR}"
-        if [ -z "$DS_DIR" ]; then
-            RESULT_NAME="${DS_NAME}__4096__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR}"
-        fi
-        RESULT_PATH="$(cd ~/kvpress/evaluation && pwd)/${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
-        
-        if [ -f "$RESULT_PATH" ]; then
-            echo "  [skip] $JOB_NAME (already done)"
-            continue
-        fi
-        
         echo "  [$COUNT] $JOB_NAME"
         sbatch /tmp/job_${JOB_NAME}.sh
         COUNT=$((COUNT + 1))
-        
-        # 每 4 个暂停，等用户确认
+
         if [ $((COUNT % 4)) -eq 0 ]; then
             echo ""
-            echo "--- Submitted $COUNT jobs (limit 4). Wait for these to finish, then run again. ---"
+            echo "--- Submitted $COUNT jobs (limit 4). Run again after they finish. ---"
             echo "--- Check: squeue -u zichuanfu2 ---"
             exit 0
         fi

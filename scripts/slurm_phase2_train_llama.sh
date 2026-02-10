@@ -8,12 +8,9 @@
 #SBATCH --time=12:00:00
 
 conda activate adasparse
-
 cd ~/SparseKV
 
-echo "=== Phase 2: SparseKV Training (Llama-3.1-8B) ==="
-
-CUDA_VISIBLE_DEVICES="0,1" python scripts/train_sparsekv.py \
+CUDA_VISIBLE_DEVICES="0,1" python scripts/train_eit.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --output_dir ./output/llama_sparsekv \
     --lr 2e-5 \
@@ -25,10 +22,10 @@ CUDA_VISIBLE_DEVICES="0,1" python scripts/train_sparsekv.py \
     --num_val_samples 500 \
     --lora_r 64 \
     --lambda_kl 1.0 \
+    --sink_size 4 \
+    --recent_size 64 \
     --initial_keep_ratio 0.9 \
     --min_keep_ratio 0.3 \
-    --scheduler_mode curriculum \
-    --sink_size 4 \
-    --recent_size 64
+    --scheduler_mode curriculum
 
-echo "Training complete! Model saved to ./output/llama_sparsekv/"
+echo "Phase 2 training complete!"
