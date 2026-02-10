@@ -6,7 +6,7 @@
 #SBATCH --mem=80G
 #SBATCH --time=12:00:00
 
-conda activate adasparse
+conda activate sparsekv
 
 cd ~/kvpress/evaluation
 

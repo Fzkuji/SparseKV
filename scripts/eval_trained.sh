@@ -4,7 +4,7 @@ set -e
 
 MODEL_PATH=${1:-"./output/block_dropout_8b"}
 
-python -m adasparse.evaluation.evaluate \
+python -m sparsekv.evaluation.evaluate \
     --model_path "$MODEL_PATH" \
     --baseline_model meta-llama/Llama-3.1-8B-Instruct \
     --press_names snapkv expected_attention streaming_llm knorm \

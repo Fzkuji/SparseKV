@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">AdaSparseKV</h1>
+  <h1 align="center">SparseKV</h1>
   <p align="center"><b>Adaptive Block Dropout Training for Robust KV Cache Eviction</b></p>
 </p>
 
@@ -13,7 +13,7 @@
 
 Deploying LLMs with long contexts requires KV cache eviction — but current methods assume that a fixed subset of tokens remains important throughout generation. **This assumption is fragile** ([DefensiveKV, 2025](https://arxiv.org/abs/2510.13334)).
 
-**AdaSparseKV** takes a different approach: instead of building better eviction heuristics, we **train the model itself** to have sparser attention patterns, so that *any* eviction method works better.
+**SparseKV** takes a different approach: instead of building better eviction heuristics, we **train the model itself** to have sparser attention patterns, so that *any* eviction method works better.
 
 ## 💡 Key Idea
 
@@ -45,8 +45,8 @@ pip install -e ".[all]"
 
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from adasparse import BlockDropoutPress
-from adasparse.training import AdaSparseTrainer, LinearCurriculum
+from sparsekv import BlockDropoutPress
+from sparsekv.training import SparseKVTrainer, LinearCurriculum
 
 model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
 tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
@@ -57,7 +57,7 @@ press = BlockDropoutPress(block_size=64, drop_ratio=0.3, protect_start=4, protec
 # Gradually increase dropout ratio
 curriculum = LinearCurriculum(start_ratio=0.0, end_ratio=0.5, warmup_steps=1000)
 
-trainer = AdaSparseTrainer(
+trainer = SparseKVTrainer(
     press=press,
     curriculum=curriculum,
     model=model,
@@ -87,13 +87,13 @@ for press in [SnapKVPress(compression_ratio=0.5), ExpectedAttentionPress(compres
 
 ```bash
 # Quick iteration on small model
-adasparse-train --config configs/train/block_dropout_1b.yaml
+sparsekv-train --config configs/train/block_dropout_1b.yaml
 
 # Full training
-adasparse-train --config configs/train/adaptive_dropout_8b.yaml
+sparsekv-train --config configs/train/adaptive_dropout_8b.yaml
 
 # Evaluation
-adasparse-eval --config configs/eval/full_eval.yaml
+sparsekv-eval --config configs/eval/full_eval.yaml
 ```
 
 ## 📦 Available Methods
@@ -141,14 +141,14 @@ adasparse-eval --config configs/eval/full_eval.yaml
 
 ## 🏗️ Architecture
 
-AdaSparseKV is built on [NVIDIA kvpress](https://github.com/NVIDIA/kvpress):
+SparseKV is built on [NVIDIA kvpress](https://github.com/NVIDIA/kvpress):
 
 ```
 kvpress BasePress (forward hook on attention layers)
     ↑ inherit
-AdaSparseKV Presses (block dropout, adaptive, soft threshold, ...)
+SparseKV Presses (block dropout, adaptive, soft threshold, ...)
     ↓ used by
-AdaSparseTrainer (HuggingFace Trainer + press integration + curriculum)
+SparseKVTrainer (HuggingFace Trainer + press integration + curriculum)
     ↓ evaluated with
 kvpress evaluation (RULER, LongBench, NIAH, ...) + sparsity/stability metrics
 ```
@@ -158,8 +158,8 @@ All presses use kvpress's hook mechanism: they register a `forward_hook` on each
 ## 📂 Project Structure
 
 ```
-AdaSparseKV/
-├── adasparse/
+SparseKV/
+├── sparsekv/
 │   ├── presses/           # Training presses (inherit kvpress BasePress)
 │   ├── training/          # Trainer, objectives, curriculum, data
 │   ├── evaluation/        # Sparsity & stability metrics
@@ -201,8 +201,8 @@ bash scripts/train.sh configs/train/adaptive_dropout_8b.yaml
 ## 📖 Citation
 
 ```bibtex
-@article{adasparse2026,
-  title={AdaSparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction},
+@article{sparsekv2026,
+  title={SparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction},
   author={},
   year={2026},
 }

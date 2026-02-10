@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for AdaSparseKV presses."""
+"""Tests for SparseKV presses."""
 
 import torch
 import pytest
@@ -23,7 +23,7 @@ class MockModule:
 
 class TestBlockDropoutPress:
     def test_training_mode_drops_blocks(self):
-        from adasparse.presses.block_dropout_press import BlockDropoutPress
+        from sparsekv.presses.block_dropout_press import BlockDropoutPress
 
         press = BlockDropoutPress(block_size=32, drop_ratio=0.5, protect_start=4, protect_recent=32, training=True)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -36,7 +36,7 @@ class TestBlockDropoutPress:
         assert new_keys.shape[2] == new_values.shape[2]
 
     def test_eval_mode_passthrough(self):
-        from adasparse.presses.block_dropout_press import BlockDropoutPress
+        from sparsekv.presses.block_dropout_press import BlockDropoutPress
 
         press = BlockDropoutPress(training=False)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -46,7 +46,7 @@ class TestBlockDropoutPress:
         assert new_keys.shape == keys.shape
 
     def test_zero_drop_ratio(self):
-        from adasparse.presses.block_dropout_press import BlockDropoutPress
+        from sparsekv.presses.block_dropout_press import BlockDropoutPress
 
         press = BlockDropoutPress(drop_ratio=0.0, training=True)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -56,7 +56,7 @@ class TestBlockDropoutPress:
         assert new_keys.shape == keys.shape
 
     def test_protects_sink_and_recent(self):
-        from adasparse.presses.block_dropout_press import BlockDropoutPress
+        from sparsekv.presses.block_dropout_press import BlockDropoutPress
 
         press = BlockDropoutPress(
             block_size=16, drop_ratio=0.9, protect_start=4, protect_recent=16, training=True
@@ -71,7 +71,7 @@ class TestBlockDropoutPress:
 
 class TestAdaptiveBlockDropoutPress:
     def test_with_attentions(self):
-        from adasparse.presses.adaptive_dropout_press import AdaptiveBlockDropoutPress
+        from sparsekv.presses.adaptive_dropout_press import AdaptiveBlockDropoutPress
 
         press = AdaptiveBlockDropoutPress(
             block_size=32, base_drop_ratio=0.3, training=True
@@ -83,7 +83,7 @@ class TestAdaptiveBlockDropoutPress:
         assert new_keys.shape[2] <= keys.shape[2]
 
     def test_without_attentions_fallback(self):
-        from adasparse.presses.adaptive_dropout_press import AdaptiveBlockDropoutPress
+        from sparsekv.presses.adaptive_dropout_press import AdaptiveBlockDropoutPress
 
         press = AdaptiveBlockDropoutPress(
             block_size=32, base_drop_ratio=0.3, training=True
@@ -97,7 +97,7 @@ class TestAdaptiveBlockDropoutPress:
 
 class TestSoftThresholdPress:
     def test_training_soft_mask(self):
-        from adasparse.presses.soft_threshold_press import SoftThresholdPress
+        from sparsekv.presses.soft_threshold_press import SoftThresholdPress
 
         press = SoftThresholdPress(threshold=0.01, temperature=10.0, training=True)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -109,7 +109,7 @@ class TestSoftThresholdPress:
         assert new_values.shape == values.shape
 
     def test_temperature_annealing(self):
-        from adasparse.presses.soft_threshold_press import SoftThresholdPress
+        from sparsekv.presses.soft_threshold_press import SoftThresholdPress
 
         press = SoftThresholdPress()
         press.anneal_temperature(step=50, total_steps=100, start_temp=1.0, end_temp=50.0)
@@ -118,7 +118,7 @@ class TestSoftThresholdPress:
 
 class TestSparseRegPress:
     def test_entropy_reg(self):
-        from adasparse.presses.sparse_reg_press import SparseRegPress
+        from sparsekv.presses.sparse_reg_press import SparseRegPress
 
         press = SparseRegPress(reg_type="entropy", reg_weight=0.01, training=True)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -132,7 +132,7 @@ class TestSparseRegPress:
         assert loss.item() > 0
 
     def test_l1_reg(self):
-        from adasparse.presses.sparse_reg_press import SparseRegPress
+        from sparsekv.presses.sparse_reg_press import SparseRegPress
 
         press = SparseRegPress(reg_type="l1", reg_weight=0.01, training=True)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -142,7 +142,7 @@ class TestSparseRegPress:
         assert loss.item() > 0
 
     def test_reset(self):
-        from adasparse.presses.sparse_reg_press import SparseRegPress
+        from sparsekv.presses.sparse_reg_press import SparseRegPress
 
         press = SparseRegPress(reg_type="entropy", training=True)
         keys, values, hidden_states, attentions = _make_dummy_inputs()
@@ -155,7 +155,7 @@ class TestSparseRegPress:
 
 class TestVariableBlockPress:
     def test_drops_blocks(self):
-        from adasparse.presses.variable_block_press import VariableBlockDropoutPress
+        from sparsekv.presses.variable_block_press import VariableBlockDropoutPress
 
         press = VariableBlockDropoutPress(
             min_block_size=16, max_block_size=64, drop_ratio=0.5, training=True
@@ -168,7 +168,7 @@ class TestVariableBlockPress:
 
 class TestCurriculum:
     def test_linear(self):
-        from adasparse.training.curriculum import LinearCurriculum
+        from sparsekv.training.curriculum import LinearCurriculum
 
         c = LinearCurriculum(start_ratio=0.0, end_ratio=0.5, warmup_steps=100)
         assert c.get_ratio(0, 1000) == 0.0
@@ -177,7 +177,7 @@ class TestCurriculum:
         assert abs(c.get_ratio(1000, 1000) - 0.5) < 0.01
 
     def test_step(self):
-        from adasparse.training.curriculum import StepCurriculum
+        from sparsekv.training.curriculum import StepCurriculum
 
         c = StepCurriculum(start_ratio=0.0, end_ratio=0.5, warmup_steps=0, n_stages=5)
         r1 = c.get_ratio(0, 1000)
@@ -185,7 +185,7 @@ class TestCurriculum:
         assert r2 > r1
 
     def test_cosine(self):
-        from adasparse.training.curriculum import CosineCurriculum
+        from sparsekv.training.curriculum import CosineCurriculum
 
         c = CosineCurriculum(start_ratio=0.0, end_ratio=0.5, warmup_steps=0)
         assert c.get_ratio(0, 1000) == 0.0
@@ -195,7 +195,7 @@ class TestCurriculum:
 
 class TestSparsityMetrics:
     def test_compute_sparsity_metrics(self):
-        from adasparse.evaluation.sparsity import compute_sparsity_metrics
+        from sparsekv.evaluation.sparsity import compute_sparsity_metrics
 
         attention = torch.softmax(torch.randn(2, 4, 64, 64), dim=-1)
         metrics = compute_sparsity_metrics(attention, block_size=16)
@@ -206,7 +206,7 @@ class TestSparsityMetrics:
         assert metrics["effective_support"] > 0
 
     def test_sparse_attention_has_lower_support(self):
-        from adasparse.evaluation.sparsity import effective_support
+        from sparsekv.evaluation.sparsity import effective_support
 
         # Uniform attention
         uniform = torch.ones(1, 1, 32, 32) / 32

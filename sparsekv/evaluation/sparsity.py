@@ -3,7 +3,7 @@
 """
 Attention sparsity metrics for evaluating how concentrated attention patterns are.
 
-These metrics help quantify whether training with AdaSparseKV actually makes
+These metrics help quantify whether training with SparseKV actually makes
 the model's attention patterns sparser (which is the whole point).
 """
 

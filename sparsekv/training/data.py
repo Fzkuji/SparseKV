@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Data loading utilities for AdaSparseKV training.
+Data loading utilities for SparseKV training.
 
 Supports loading from HuggingFace datasets with proper tokenization
 and sequence packing for efficient long-context training.

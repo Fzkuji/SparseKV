@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Evaluation script for AdaSparseKV.
+Evaluation script for SparseKV.
 
 Evaluates trained models with various KV cache eviction methods using kvpress,
 and computes sparsity/stability metrics.
 
 Usage:
-    adasparse-eval --config configs/eval/full_eval.yaml
+    sparsekv-eval --config configs/eval/full_eval.yaml
 
-    python -m adasparse.evaluation.evaluate \
+    python -m sparsekv.evaluation.evaluate \
         --model_path ./output/block_dropout_8b \
         --press_names snapkv expected_attention streaming_llm \
         --compression_ratios 0.3 0.5 0.7
@@ -24,8 +24,8 @@ import torch
 import yaml
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache, pipeline
 
-from adasparse.evaluation.sparsity import compute_sparsity_metrics
-from adasparse.evaluation.stability import compute_stability_metrics
+from sparsekv.evaluation.sparsity import compute_sparsity_metrics
+from sparsekv.evaluation.stability import compute_stability_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ def evaluate_sparsity(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AdaSparseKV Evaluation")
+    parser = argparse.ArgumentParser(description="SparseKV Evaluation")
     parser.add_argument("--config", type=str, help="Path to YAML config file")
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--baseline_model", type=str, default=None, help="Original model for comparison")

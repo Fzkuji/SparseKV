@@ -1,5 +1,5 @@
 #!/bin/bash
-# AdaSparseKV Training Script
+# SparseKV Training Script
 # Usage: bash scripts/train.sh [config_file]
 
 set -e
@@ -7,8 +7,8 @@ set -e
 CONFIG=${1:-"configs/train/block_dropout_8b.yaml"}
 
 echo "=========================================="
-echo "  AdaSparseKV Training"
+echo "  SparseKV Training"
 echo "  Config: $CONFIG"
 echo "=========================================="
 
-python -m adasparse.training.train --config "$CONFIG"
+python -m sparsekv.training.train --config "$CONFIG"

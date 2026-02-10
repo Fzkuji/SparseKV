@@ -2,5 +2,5 @@
 # Evaluate baseline model (no training) with various eviction methods
 set -e
 
-python -m adasparse.evaluation.evaluate \
+python -m sparsekv.evaluation.evaluate \
     --config configs/eval/baseline.yaml

@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "adasparse"
+name = "sparsekv"
 version = "0.1.0"
-description = "AdaSparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction"
+description = "SparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
-    { name = "AdaSparseKV Team" }
+    { name = "SparseKV Team" }
 ]
 keywords = ["LLM", "KV Cache", "Eviction", "Sparse Attention", "Dropout"]
 classifiers = [
@@ -45,14 +45,14 @@ dev = [
     "ruff",
     "pre-commit",
 ]
-all = ["adasparse[eval,vis,dev]"]
+all = ["sparsekv[eval,vis,dev]"]
 
 [project.scripts]
-adasparse-train = "adasparse.training.train:main"
-adasparse-eval = "adasparse.evaluation.evaluate:main"
+sparsekv-train = "sparsekv.training.train:main"
+sparsekv-eval = "sparsekv.evaluation.evaluate:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["adasparse"]
+packages = ["sparsekv"]
 
 [tool.ruff]
 line-length = 120

@@ -1,8 +1,8 @@
-# AdaSparseKV - Implementation Guide
+# SparseKV - Implementation Guide
 
 ## Project Overview
 
-AdaSparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction
+SparseKV: Adaptive Block Dropout Training for Robust KV Cache Eviction
 
 **Core Idea**: Train LLMs with block-wise KV cache dropout so that inference-time eviction methods (SnapKV, H2O, etc.) work better. The model learns to be robust to missing KV cache entries.
 
@@ -28,13 +28,13 @@ This project builds ON TOP of kvpress. We inherit from `kvpress.presses.base_pre
 ## Project Structure
 
 ```
-AdaSparseKV/
+SparseKV/
 ├── README.md                    # Professional README with badges, installation, usage, citation
 ├── LICENSE                      # Apache 2.0 (already exists)
 ├── pyproject.toml              # Modern Python packaging
 ├── .gitignore                  # Already exists
 │
-├── adasparse/                  # Main package
+├── sparsekv/                  # Main package
 │   ├── __init__.py             # Export all presses and key functions
 │   │
 │   ├── presses/                # Custom press implementations (inherit kvpress BasePress)
@@ -122,7 +122,7 @@ AdaSparseKV/
 
 ### 2. Training
 
-#### AdaSparseTrainer (trainer.py)
+#### SparseKVTrainer (trainer.py)
 - Extends HuggingFace Trainer
 - Integrates press into training loop via `with press(model):`
 - Supports multiple training objectives

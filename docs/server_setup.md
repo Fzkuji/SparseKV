@@ -3,9 +3,9 @@
 ## 1. 创建 Conda 环境
 
 ```bash
-conda create -n adasparse python=3.11 -y
-conda activate adasparse
-echo "conda activate adasparse" >> ~/.bashrc
+conda create -n sparsekv python=3.11 -y
+conda activate sparsekv
+echo "conda activate sparsekv" >> ~/.bashrc
 ```
 
 ## 2. 安装 PyTorch
@@ -30,11 +30,11 @@ cd kvpress
 pip install -e ".[eval]"
 ```
 
-## 5. 克隆 AdaSparseKV
+## 5. 克隆 SparseKV
 
 ```bash
 cd ~
-git clone https://github.com/Fzkuji/AdaSparseKV.git
+git clone https://github.com/Fzkuji/SparseKV.git
 ```
 
 ## 6. 登录 HuggingFace（Llama 需要）
@@ -71,7 +71,7 @@ print('All good!')
 ## 9. 运行 Llama Baseline 评测
 
 ```bash
-cd ~/AdaSparseKV
+cd ~/SparseKV
 bash scripts/submit_all.sh llama
 squeue -u $(whoami)
 ```

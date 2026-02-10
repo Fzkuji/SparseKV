@@ -50,11 +50,11 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --gres=gpu:2
 #SBATCH --time=12:00:00
 
-conda activate adasparse
+conda activate sparsekv
 
 cd ~/kvpress/evaluation
 
-CUDA_VISIBLE_DEVICES="0,1" python ~/AdaSparseKV/scripts/eval_wrapper.py \\
+CUDA_VISIBLE_DEVICES="0,1" python ~/SparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\

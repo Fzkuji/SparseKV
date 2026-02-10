@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Main training script for AdaSparseKV.
+Main training script for SparseKV.
 
 Usage:
-    adasparse-train --config configs/train/block_dropout_8b.yaml
+    sparsekv-train --config configs/train/block_dropout_8b.yaml
 
     # Or with command-line overrides:
-    python -m adasparse.training.train \
+    python -m sparsekv.training.train \
         --model_name_or_path meta-llama/Llama-3.1-8B-Instruct \
         --press_type block_dropout \
         --drop_ratio 0.3 \
@@ -26,15 +26,15 @@ from transformers import (
     TrainingArguments,
 )
 
-from adasparse.presses.adaptive_dropout_press import AdaptiveBlockDropoutPress
-from adasparse.presses.block_dropout_press import BlockDropoutPress
-from adasparse.presses.eviction_aug_press import EvictionAugPress
-from adasparse.presses.soft_threshold_press import SoftThresholdPress
-from adasparse.presses.sparse_reg_press import SparseRegPress
-from adasparse.presses.variable_block_press import VariableBlockDropoutPress
-from adasparse.training.curriculum import CosineCurriculum, LinearCurriculum, StepCurriculum
-from adasparse.training.data import DataConfig, create_data_collator, load_dataset_for_training
-from adasparse.training.trainer import AdaSparseTrainer
+from sparsekv.presses.adaptive_dropout_press import AdaptiveBlockDropoutPress
+from sparsekv.presses.block_dropout_press import BlockDropoutPress
+from sparsekv.presses.eviction_aug_press import EvictionAugPress
+from sparsekv.presses.soft_threshold_press import SoftThresholdPress
+from sparsekv.presses.sparse_reg_press import SparseRegPress
+from sparsekv.presses.variable_block_press import VariableBlockDropoutPress
+from sparsekv.training.curriculum import CosineCurriculum, LinearCurriculum, StepCurriculum
+from sparsekv.training.data import DataConfig, create_data_collator, load_dataset_for_training
+from sparsekv.training.trainer import SparseKVTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def load_config(config_path: str) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AdaSparseKV Training")
+    parser = argparse.ArgumentParser(description="SparseKV Training")
     parser.add_argument("--config", type=str, help="Path to YAML config file")
     parser.add_argument("--model_name_or_path", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default="./output")
@@ -242,7 +242,7 @@ def main():
     )
 
     # Create trainer
-    trainer = AdaSparseTrainer(
+    trainer = SparseKVTrainer(
         press=press,
         curriculum=curriculum,
         reg_press=reg_press,

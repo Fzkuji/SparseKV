@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-AdaSparseTrainer: Custom HuggingFace Trainer with press integration.
+SparseKVTrainer: Custom HuggingFace Trainer with press integration.
 
 Integrates KV cache dropout presses into the training loop, supports
 curriculum learning, and handles multiple training objectives.
@@ -22,15 +22,15 @@ from transformers import (
 
 from kvpress.presses.base_press import BasePress
 
-from adasparse.presses.sparse_reg_press import SparseRegPress
-from adasparse.training.curriculum import BaseCurriculum
+from sparsekv.presses.sparse_reg_press import SparseRegPress
+from sparsekv.training.curriculum import BaseCurriculum
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AdaSparseTrainingArguments(TrainingArguments):
-    """Extended training arguments for AdaSparseKV."""
+class SparseKVTrainingArguments(TrainingArguments):
+    """Extended training arguments for SparseKV."""
 
     # Press configuration
     press_type: str = "block_dropout"
@@ -60,7 +60,7 @@ class AdaSparseTrainingArguments(TrainingArguments):
     output_attentions: bool = False
 
 
-class AdaSparseTrainer(Trainer):
+class SparseKVTrainer(Trainer):
     """
     Custom Trainer that integrates KV cache dropout presses.
 

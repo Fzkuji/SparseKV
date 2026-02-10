@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Training objectives for AdaSparseKV.
+Training objectives for SparseKV.
 
 Supports multiple training signals:
 1. StandardLM: next-token prediction with dropout press (cache robustness)
@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn.functional as F
 
-from adasparse.presses.sparse_reg_press import SparseRegPress
+from sparsekv.presses.sparse_reg_press import SparseRegPress
 
 
 @dataclass

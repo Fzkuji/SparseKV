@@ -73,7 +73,7 @@ def plot_sparsity_comparison(
     ax.set_xticks(list(x))
     ax.set_xticklabels(keys, rotation=45, ha="right")
     ax.set_ylabel("Value")
-    ax.set_title("Sparsity Metrics: Original vs AdaSparseKV-Trained")
+    ax.set_title("Sparsity Metrics: Original vs SparseKV-Trained")
     ax.legend()
 
     if save_path:
