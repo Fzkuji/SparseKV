@@ -91,9 +91,10 @@ HEREDOC
         sbatch /tmp/job_${JOB_NAME}.sh
         COUNT=$((COUNT + 1))
 
-        if [ $((COUNT % 4)) -eq 0 ]; then
+        BATCH_SIZE=${2:-4}
+        if [ $((COUNT % BATCH_SIZE)) -eq 0 ]; then
             echo ""
-            echo "--- Submitted $COUNT jobs (limit 4). Run again after they finish. ---"
+            echo "--- Submitted $COUNT jobs (limit $BATCH_SIZE). Run again after they finish. ---"
             echo "--- Check: squeue -u zichuanfu2 ---"
             exit 0
         fi
