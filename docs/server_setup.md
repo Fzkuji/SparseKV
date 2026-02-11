@@ -90,21 +90,21 @@ bash scripts/submit_all.sh llama_trained
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `GPUS` | `0,1` | 使用的 GPU 编号，逗号分隔 |
-| `BATCH` | `16` | 每次提交的最大 job 数 |
+| `GPUS` | `0,1` | 使用的 GPU 编号，逗号分隔。2 张卡时自动配对并行 |
+| `BATCH` | `4` | 每次提交的最大 slurm job 数（每个 job 含 2 个评测任务） |
 
 ```bash
-# 使用 GPU 2 和 3，每次提交 16 个 job
+# 使用 GPU 2 和 3
 GPUS="2,3" bash scripts/submit_all.sh qwen3
 
-# 使用单张卡，提交 8 个 job
-GPUS="0" BATCH=8 bash scripts/submit_all.sh qwen3
+# 自定义 batch size
+GPUS="2,3" BATCH=8 bash scripts/submit_all.sh qwen3
 
 # 一次提交全部剩余任务
 GPUS="2,3" BATCH=999 bash scripts/submit_all.sh qwen3
 ```
 
-每个 job 使用 1 张 GPU，多张卡时 job 会交替分配到不同卡上并行执行。例如 `GPUS="2,3"` 时，奇数 job 用卡 2，偶数 job 用卡 3。
+**并行执行**：指定多张卡时（如 `GPUS="2,3"`），脚本会将两个评测任务配对到一个 slurm job 中，每张卡各跑一个任务，吞吐量翻倍。每个评测任务独占 1 张 GPU（8B 模型约 17GB 显存，A100 80GB 绰绰有余）。
 
 ### 断点续跑
 
@@ -158,10 +158,10 @@ find ~/kvpress/evaluation/results/phase1_qwen3 -name "profiling.json" -exec cat 
 
 | 项目 | 最低要求 |
 |------|---------|
-| GPU | 1× A100 80GB（单 job）|
+| GPU | 1× A100 80GB（单任务）或 2×（并行配对） |
 | CUDA | 12.1+ |
 | 内存 | 60GB+ |
 | 磁盘 | 50GB+（模型缓存） |
 | Python | 3.11 |
 
-> 注：多张卡可并行跑多个 job，每个 job 独占 1 张卡。
+> 注：8B 模型推理约占 17GB 显存，A100 80GB 单卡即可。2 张卡时脚本自动并行配对，吞吐翻倍。
