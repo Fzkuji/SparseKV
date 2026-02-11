@@ -25,7 +25,7 @@ pip install flash-attn --no-cache-dir --no-build-isolation
 
 ```bash
 cd ~
-git clone https://github.com/simon-mo/kvpress.git
+git clone https://github.com/NVIDIA/kvpress.git
 cd kvpress
 pip install -e ".[eval]"
 ```
