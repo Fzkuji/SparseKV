@@ -79,14 +79,14 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --output=/home/zichuanfu2/logs/output_%j.txt
 #SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=60G
-#SBATCH --gres=gpu:1
+#SBATCH --mem=80G
+#SBATCH --gres=gpu:2
 #SBATCH --time=24:00:00
 
 eval "\$(conda shell.bash hook 2>/dev/null)" && conda activate adasparse
 cd ~/kvpress/evaluation
 
-CUDA_VISIBLE_DEVICES="${GPU_LIST[$((COUNT % ${#GPU_LIST[@]}))]}" python ~/SparseKV/scripts/eval_wrapper.py \\
+CUDA_VISIBLE_DEVICES="${GPUS}" python ~/SparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
