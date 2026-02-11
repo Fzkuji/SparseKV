@@ -61,11 +61,13 @@ for ds_entry in "${DATASETS[@]}"; do
             DATA_DIR_ARG="--data_dir $DS_DIR"
         fi
 
-        # Skip if already done
-        RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR}"
-        RESULT_PATH="$(cd ~/kvpress/evaluation 2>/dev/null && pwd)/${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
+        # Skip if already done (use printf to match kvpress's %.2f format)
+        CR_FMT=$(printf "%.2f" "$CR")
+        RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR_FMT}"
+        EVAL_BASE="$(cd ~/kvpress/evaluation 2>/dev/null && pwd)"
+        RESULT_PATH="${EVAL_BASE}/${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
         if [ -f "$RESULT_PATH" ]; then
-            echo "  [skip] $JOB_NAME (done)"
+            echo "  [skip] $JOB_NAME (done: $RESULT_NAME)"
             continue
         fi
 
