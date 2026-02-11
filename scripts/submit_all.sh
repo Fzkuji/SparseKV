@@ -48,6 +48,8 @@ echo "Will submit up to 4 jobs (${#DATASETS[@]} datasets x ${#PRESSES[@]} presse
 echo ""
 
 COUNT=0
+SLURM_COUNT=0
+PENDING_JOBS=()
 for ds_entry in "${DATASETS[@]}"; do
     DS_NAME="${ds_entry%%:*}"
     DS_DIR="${ds_entry##*:}"
@@ -73,9 +75,79 @@ for ds_entry in "${DATASETS[@]}"; do
             continue
         fi
 
-        cat > /tmp/job_${JOB_NAME}.sh << HEREDOC
+        # Collect jobs to pair them (2 evals per slurm job, 1 per GPU)
+        PENDING_JOBS+=("${DS_NAME}|${DATA_DIR_ARG}|${PRESS}|${CR}|${JOB_NAME}")
+        COUNT=$((COUNT + 1))
+
+        # When we have 2 pending jobs, submit them as a single slurm job
+        if [ ${#PENDING_JOBS[@]} -eq 2 ]; then
+            J1="${PENDING_JOBS[0]}"
+            J2="${PENDING_JOBS[1]}"
+            IFS='|' read -r DS1 DARG1 PR1 CR1 JN1 <<< "$J1"
+            IFS='|' read -r DS2 DARG2 PR2 CR2 JN2 <<< "$J2"
+
+            PAIR_NAME="${JN1}+${JN2}"
+            cat > /tmp/job_${PAIR_NAME}.sh << HEREDOC
 #!/bin/bash
-#SBATCH --job-name=${JOB_NAME}
+#SBATCH --job-name=${PAIR_NAME}
+#SBATCH --output=/home/zichuanfu2/logs/output_%j.txt
+#SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=80G
+#SBATCH --gres=gpu:2
+#SBATCH --time=24:00:00
+
+eval "\$(conda shell.bash hook 2>/dev/null)" && conda activate adasparse
+cd ~/kvpress/evaluation
+
+IFS=',' read -ra _GPUS <<< "${GPUS}"
+
+echo "=== Starting job 1: ${JN1} on GPU \${_GPUS[0]} ==="
+CUDA_VISIBLE_DEVICES="\${_GPUS[0]}" python ~/SparseKV/scripts/eval_wrapper.py \\
+    --model ${MODEL} \\
+    --dataset ${DS1} ${DARG1} \\
+    --press_name ${PR1} \\
+    --compression_ratio ${CR1} \\
+    --output_dir ${OUTPUT_DIR} &
+PID1=\$!
+
+echo "=== Starting job 2: ${JN2} on GPU \${_GPUS[1]} ==="
+CUDA_VISIBLE_DEVICES="\${_GPUS[1]}" python ~/SparseKV/scripts/eval_wrapper.py \\
+    --model ${MODEL} \\
+    --dataset ${DS2} ${DARG2} \\
+    --press_name ${PR2} \\
+    --compression_ratio ${CR2} \\
+    --output_dir ${OUTPUT_DIR} &
+PID2=\$!
+
+wait \$PID1 \$PID2
+echo "=== Both jobs completed ==="
+HEREDOC
+
+            echo "  [$((COUNT-2)),$((COUNT-1))] $JN1 + $JN2 (paired)"
+            sbatch /tmp/job_${PAIR_NAME}.sh
+            SLURM_COUNT=$((SLURM_COUNT + 1))
+            PENDING_JOBS=()
+        fi
+
+        BATCH_SIZE=${BATCH:-4}
+        if [ $SLURM_COUNT -ge $BATCH_SIZE ]; then
+            echo ""
+            echo "--- Submitted $SLURM_COUNT slurm jobs ($COUNT eval tasks). Run again after they finish. ---"
+            echo "--- Check: squeue -u zichuanfu2 ---"
+            exit 0
+        fi
+    done
+done
+
+# Submit any remaining unpaired job
+if [ ${#PENDING_JOBS[@]} -eq 1 ]; then
+    J1="${PENDING_JOBS[0]}"
+    IFS='|' read -r DS1 DARG1 PR1 CR1 JN1 <<< "$J1"
+
+    cat > /tmp/job_${JN1}.sh << HEREDOC
+#!/bin/bash
+#SBATCH --job-name=${JN1}
 #SBATCH --output=/home/zichuanfu2/logs/output_%j.txt
 #SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
 #SBATCH --cpus-per-task=4
@@ -88,25 +160,16 @@ cd ~/kvpress/evaluation
 
 CUDA_VISIBLE_DEVICES="${GPUS}" python ~/SparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
-    --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
-    --press_name ${PRESS} \\
-    --compression_ratio ${CR} \\
+    --dataset ${DS1} ${DARG1} \\
+    --press_name ${PR1} \\
+    --compression_ratio ${CR1} \\
     --output_dir ${OUTPUT_DIR}
 HEREDOC
 
-        echo "  [$COUNT] $JOB_NAME"
-        sbatch /tmp/job_${JOB_NAME}.sh
-        COUNT=$((COUNT + 1))
-
-        BATCH_SIZE=${BATCH:-4}
-        if [ $((COUNT % BATCH_SIZE)) -eq 0 ]; then
-            echo ""
-            echo "--- Submitted $COUNT jobs (limit $BATCH_SIZE). Run again after they finish. ---"
-            echo "--- Check: squeue -u zichuanfu2 ---"
-            exit 0
-        fi
-    done
-done
+    echo "  [$((COUNT-1))] $JN1 (single)"
+    sbatch /tmp/job_${JN1}.sh
+    SLURM_COUNT=$((SLURM_COUNT + 1))
+fi
 
 echo ""
-echo "All $COUNT jobs submitted. Check: squeue -u zichuanfu2"
+echo "All done: $SLURM_COUNT slurm jobs submitted ($COUNT eval tasks). Check: squeue -u zichuanfu2"
