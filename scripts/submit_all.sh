@@ -34,6 +34,9 @@ case $MODEL_KEY in
         ;;
 esac
 
+# GPU selection: override with GPUS env var, e.g. GPUS="2,3" bash scripts/submit_all.sh qwen3
+GPUS=${GPUS:-"0,1"}
+
 DATASETS=("ruler:4096" "ruler:16384" "longbench:" "aime25:")
 PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
 
@@ -79,7 +82,7 @@ for ds_entry in "${DATASETS[@]}"; do
 conda activate adasparse
 cd ~/kvpress/evaluation
 
-CUDA_VISIBLE_DEVICES="0,1" python ~/SparseKV/scripts/eval_wrapper.py \\
+CUDA_VISIBLE_DEVICES="${GPUS}" python ~/SparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
