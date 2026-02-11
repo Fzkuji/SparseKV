@@ -84,23 +84,31 @@ bash scripts/submit_all.sh qwen3_trained
 bash scripts/submit_all.sh llama_trained
 ```
 
-### GPU 选择
+### 参数说明
 
-默认使用 GPU 0,1。通过 `GPUS` 环境变量指定使用哪些卡：
+所有参数通过环境变量设置：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `GPUS` | `0,1` | 使用的 GPU 编号，逗号分隔 |
+| `BATCH` | `16` | 每次提交的最大 job 数 |
 
 ```bash
-# 使用 GPU 2 和 3
+# 使用 GPU 2 和 3，每次提交 16 个 job
 GPUS="2,3" bash scripts/submit_all.sh qwen3
 
-# 使用单张卡
-GPUS="0" bash scripts/submit_all.sh qwen3
+# 使用单张卡，提交 8 个 job
+GPUS="0" BATCH=8 bash scripts/submit_all.sh qwen3
+
+# 一次提交全部剩余任务
+GPUS="2,3" BATCH=999 bash scripts/submit_all.sh qwen3
 ```
 
-每个 job 使用 1 张 GPU，多张卡时 job 会交替分配到不同卡上并行执行。
+每个 job 使用 1 张 GPU，多张卡时 job 会交替分配到不同卡上并行执行。例如 `GPUS="2,3"` 时，奇数 job 用卡 2，偶数 job 用卡 3。
 
 ### 断点续跑
 
-脚本会自动跳过已完成的任务（检查 `metrics.json` 是否存在）。每次提交一批 job（默认 8 个），跑完后再执行一次同样的命令即可继续：
+脚本会自动跳过已完成的任务（检查 `metrics.json` 是否存在）。每次提交一批 job，跑完后再执行一次同样的命令即可继续：
 
 ```bash
 # 查看当前任务状态
