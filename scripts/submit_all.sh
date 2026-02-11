@@ -35,7 +35,9 @@ case $MODEL_KEY in
 esac
 
 # GPU selection: override with GPUS env var, e.g. GPUS="2,3" bash scripts/submit_all.sh qwen3
+# Jobs alternate between GPUs for parallel execution
 GPUS=${GPUS:-"0,1"}
+IFS=',' read -ra GPU_LIST <<< "$GPUS"
 
 DATASETS=("ruler:4096" "ruler:16384" "longbench:" "aime25:")
 PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
@@ -77,14 +79,14 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --output=/home/zichuanfu2/logs/output_%j.txt
 #SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=80G
-#SBATCH --gres=gpu:2
+#SBATCH --mem=60G
+#SBATCH --gres=gpu:1
 #SBATCH --time=24:00:00
 
 eval "\$(conda shell.bash hook 2>/dev/null)" && conda activate adasparse
 cd ~/kvpress/evaluation
 
-CUDA_VISIBLE_DEVICES="${GPUS}" python ~/SparseKV/scripts/eval_wrapper.py \\
+CUDA_VISIBLE_DEVICES="${GPU_LIST[$((COUNT % ${#GPU_LIST[@]}))]}" python ~/SparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
@@ -96,7 +98,7 @@ HEREDOC
         sbatch /tmp/job_${JOB_NAME}.sh
         COUNT=$((COUNT + 1))
 
-        BATCH_SIZE=${2:-4}
+        BATCH_SIZE=${2:-8}
         if [ $((COUNT % BATCH_SIZE)) -eq 0 ]; then
             echo ""
             echo "--- Submitted $COUNT jobs (limit $BATCH_SIZE). Run again after they finish. ---"
