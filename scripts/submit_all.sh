@@ -98,7 +98,7 @@ HEREDOC
         sbatch /tmp/job_${JOB_NAME}.sh
         COUNT=$((COUNT + 1))
 
-        BATCH_SIZE=${BATCH:-16}
+        BATCH_SIZE=${BATCH:-4}
         if [ $((COUNT % BATCH_SIZE)) -eq 0 ]; then
             echo ""
             echo "--- Submitted $COUNT jobs (limit $BATCH_SIZE). Run again after they finish. ---"
