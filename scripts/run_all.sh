@@ -72,6 +72,9 @@ echo ""
 echo "Pending: ${TOTAL_JOBS}  Skipped: ${SKIPPED}"
 echo ""
 
+# Change to kvpress evaluation dir (eval_wrapper.py calls evaluate.py which must be in cwd)
+cd ~/kvpress/evaluation
+
 # Run in batches of NUM_GPUS
 LAUNCHED=0
 FAILED=0
