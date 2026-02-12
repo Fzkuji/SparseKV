@@ -26,13 +26,9 @@ fi
 IFS=',' read -ra GPU_LIST <<< "$GPUS"
 NUM_GPUS=${#GPU_LIST[@]}
 
-# Jobs per GPU (H20 96GB can fit 4-5 copies of 8B model)
-JOBS_PER_GPU=${JOBS_PER_GPU:-4}
-MAX_PARALLEL=$((NUM_GPUS * JOBS_PER_GPU))
-
 echo "Model:        ${MODEL}"
 echo "Output:       ${OUTPUT_DIR}"
-echo "GPUs:         ${GPUS} (${NUM_GPUS} total, ${JOBS_PER_GPU} jobs/GPU, max ${MAX_PARALLEL} parallel)"
+echo "GPUs:         ${GPUS} (${NUM_GPUS} total)"
 echo "Logs:         ${LOG_DIR}"
 echo ""
 
@@ -79,16 +75,16 @@ echo ""
 # Change to kvpress evaluation dir (eval_wrapper.py calls evaluate.py which must be in cwd)
 cd ~/kvpress/evaluation
 
-# Run in batches of MAX_PARALLEL, round-robin across GPUs
+# Run in batches of NUM_GPUS
 LAUNCHED=0
 FAILED=0
-for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=MAX_PARALLEL)); do
+for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=NUM_GPUS)); do
     PIDS=()
     BATCH_NAMES=()
 
-    for ((i=0; i<MAX_PARALLEL && batch_start+i<TOTAL_JOBS; i++)); do
+    for ((i=0; i<NUM_GPUS && batch_start+i<TOTAL_JOBS; i++)); do
         idx=$((batch_start + i))
-        GPU=${GPU_LIST[$((i % NUM_GPUS))]}
+        GPU=${GPU_LIST[$i]}
 
         IFS='|' read -r JOB_NAME DS_NAME DATA_DIR_ARG PRESS CR <<< "${JOBS[$idx]}"
         LOG_FILE="${LOG_DIR}/${JOB_NAME}.log"
