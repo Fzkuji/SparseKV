@@ -44,7 +44,6 @@ def parse_args():
 def run_single_cr(cr, model_path, kvpress_eval_dir, output_dir, device, context_length, fraction, model_tag):
     """Run evaluation for a single compression ratio on a specific GPU. Runs in a subprocess."""
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    os.environ["CUDA_VISIBLE_DEVICES"] = device.replace("cuda:", "")
 
     sys.path.insert(0, kvpress_eval_dir)
 
@@ -56,7 +55,7 @@ def run_single_cr(cr, model_path, kvpress_eval_dir, output_dir, device, context_
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
-        device_map="cuda:0",  # always cuda:0 within subprocess (CUDA_VISIBLE_DEVICES handles mapping)
+        device_map=device,
         attn_implementation="eager",
     )
     model.eval()
