@@ -13,8 +13,7 @@
 
 set -e
 
-# Only disable transformers model downloads, not datasets
-export TRANSFORMERS_OFFLINE=1
+# Note: don't set HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE - breaks datasets cache lookup
 
 # Project root (where this script lives: SparseKV/scripts/)
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
