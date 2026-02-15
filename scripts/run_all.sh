@@ -182,8 +182,8 @@ if [ "$TOTAL_PARALLEL" -gt 0 ]; then
                 for pid in "${ACTIVE_PIDS[@]}"; do
                     if ! kill -0 "$pid" 2>/dev/null; then
                         # Process finished, check exit code
-                        wait "$pid" 2>/dev/null || true
-                        EXIT_CODE=$?
+                        EXIT_CODE=0
+                        wait "$pid" 2>/dev/null || EXIT_CODE=$?
                         FINISHED_NAME="${PID_NAME[$pid]}"
                         FINISHED_GPU="${PID_GPU[$pid]}"
 
