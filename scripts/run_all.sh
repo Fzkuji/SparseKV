@@ -14,13 +14,14 @@
 
 set -e
 
-# Cleanup: kill all child processes on exit (Ctrl+C, kill, or error)
+# Cleanup: kill entire process group on exit (Ctrl+C, kill, or error)
 cleanup() {
     echo ""
     echo "Caught signal, killing all child processes..."
-    kill $(jobs -p) 2>/dev/null
-    wait 2>/dev/null
-    echo "All children terminated."
+    trap - SIGINT SIGTERM EXIT  # prevent re-entry
+    pkill -TERM -P $$ 2>/dev/null  # kill all descendants
+    sleep 1
+    pkill -KILL -P $$ 2>/dev/null  # force kill stragglers
     exit 1
 }
 trap cleanup SIGINT SIGTERM EXIT
