@@ -76,23 +76,33 @@ def main():
             failed.append((subdir.name, str(e)))
             continue
 
-        # Extract main score (different benchmarks use different keys)
+        # Extract main score
         score = None
         score_key = None
         if isinstance(metrics, dict):
+            # Try top-level scalar keys first
             for key in ["score", "accuracy", "exact_match", "f1", "rouge_score", "avg_score"]:
-                if key in metrics:
+                if key in metrics and isinstance(metrics[key], (int, float)):
                     score = metrics[key]
                     score_key = key
                     break
 
-            # If no known key, take the first numeric value
+            # If no top-level scalar, check if it's nested subtask format:
+            # {"task1": {"string_match": 99.0}, "task2": {"string_match": 95.0}, ...}
             if score is None:
+                subtask_scores = []
                 for key, val in metrics.items():
-                    if isinstance(val, (int, float)):
-                        score = val
-                        score_key = key
-                        break
+                    if isinstance(val, dict):
+                        # Try common metric keys within subtask
+                        for mk in ["string_match", "score", "accuracy", "f1", "exact_match"]:
+                            if mk in val and isinstance(val[mk], (int, float)):
+                                subtask_scores.append(val[mk])
+                                break
+                    elif isinstance(val, (int, float)):
+                        subtask_scores.append(val)
+                if subtask_scores:
+                    score = sum(subtask_scores) / len(subtask_scores)
+                    score_key = f"avg({len(subtask_scores)} subtasks)"
         elif isinstance(metrics, (int, float)):
             score = metrics
             score_key = "value"
