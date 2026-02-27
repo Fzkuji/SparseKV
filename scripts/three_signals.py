@@ -312,8 +312,8 @@ for idx_i, sample_idx in enumerate(selected):
                         evict_positions = (~keep_mid).nonzero(as_tuple=True)[0] + middle_start
                         evict_positions = evict_positions.to(device)
 
-                        cache_copy.key_cache[li][0, h, evict_positions] = 0
-                        cache_copy.value_cache[li][0, h, evict_positions] = 0
+                        cache_copy.layers[li].keys[0, h, evict_positions] = 0
+                        cache_copy.layers[li].values[0, h, evict_positions] = 0
 
             gen_text = generate_with_cache(cache_copy, out, max_new)
             correct = scorer(gen_text, answers)
