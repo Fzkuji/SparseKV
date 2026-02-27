@@ -280,10 +280,12 @@ for idx_i, sample_idx in enumerate(selected):
             attn_chunk = attn[:, :, :, c_start:c_end]  # [1, n_q_heads, q_total_len, chunk_len]
             attn_chunk = attn_chunk.view(1, n_kv_heads, n_groups, q_total_len, c_end - c_start)
             # Max over groups and query positions
-            chunk_scores = attn_chunk.amax(dim=(-3, -2))  # [1, chunk_len]
+            # attn_chunk: [1, n_kv_heads, n_groups, q_total_len, chunk_len]
+            # amax over dim -3 (groups) and -2 (q_positions) → [1, n_kv_heads, chunk_len]
+            chunk_scores = attn_chunk.amax(dim=(-3, -2))  # [1, n_kv_heads, chunk_len]
             recons_scores[li, :, c_start:c_end] = torch.max(
                 recons_scores[li, :, c_start:c_end],
-                chunk_scores[0].unsqueeze(0).expand(n_kv_heads, -1).cpu()
+                chunk_scores[0].cpu()  # [n_kv_heads, chunk_len]
             )
         
         del recons_out, cache_for_recons
