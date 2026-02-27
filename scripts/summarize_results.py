@@ -79,19 +79,23 @@ def main():
         # Extract main score (different benchmarks use different keys)
         score = None
         score_key = None
-        for key in ["score", "accuracy", "exact_match", "f1", "rouge_score", "avg_score"]:
-            if key in metrics:
-                score = metrics[key]
-                score_key = key
-                break
-
-        # If no known key, take the first numeric value
-        if score is None:
-            for key, val in metrics.items():
-                if isinstance(val, (int, float)):
-                    score = val
+        if isinstance(metrics, dict):
+            for key in ["score", "accuracy", "exact_match", "f1", "rouge_score", "avg_score"]:
+                if key in metrics:
+                    score = metrics[key]
                     score_key = key
                     break
+
+            # If no known key, take the first numeric value
+            if score is None:
+                for key, val in metrics.items():
+                    if isinstance(val, (int, float)):
+                        score = val
+                        score_key = key
+                        break
+        elif isinstance(metrics, (int, float)):
+            score = metrics
+            score_key = "value"
 
         # Profiling info
         time_min = None
