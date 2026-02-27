@@ -249,12 +249,10 @@ class ScoringOnlyKVzipPress(KVzipPress):
     def __init__(self, **kwargs):
         super().__init__(compression_ratio=0.5, **kwargs)  # dummy ratio
         self.saved_score = None
-        self.saved_cache = None
     
     def compress_post(self, model):
-        """Don't compress, just save scores and cache."""
+        """Don't compress, just save scores."""
         self.saved_score = self.score_val.clone() if self.score_val is not None else None
-        self.saved_cache = copy.deepcopy(self._cache) if self._cache is not None else None
         # Don't call super — skip compression
 
 
@@ -305,7 +303,8 @@ for idx_i, sample_idx in enumerate(selected):
             prefill_out = model(input_ids=input_ids, past_key_values=cache, num_logits_to_keep=1)
     
     score_val = press.saved_score  # [n_layer, 1, n_kv_heads, context_length]
-    base_cache = press.saved_cache
+    # Cache is still in press._cache (not deep copied)
+    base_cache = press._cache
     
     if score_val is None or base_cache is None:
         print(f"  [{idx_i+1}] KVzip scoring failed, skipping")
@@ -320,37 +319,46 @@ for idx_i, sample_idx in enumerate(selected):
     first_token = prefill_out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     
     # ================================================================
-    # Evaluate at each ratio
+    # Evaluate at each ratio (save/restore instead of deep copy)
     # ================================================================
     ctx_len = score_val.shape[-1]
     
     for ratio in EVICT_RATIOS:
-        # Copy cache
-        cache_copy = copy.deepcopy(base_cache)
-        
-        # Compute eviction
+        # Compute eviction indices
         n_pruned_total = int(score_val.numel() * ratio)
+        saved_kv = []  # list of (layer, head_idx, seq_idx, saved_keys, saved_values)
+        
         if n_pruned_total > 0:
             pruned_flat = torch.topk(-score_val.reshape(-1), min(n_pruned_total, score_val.numel())).indices
-            n_tokens_per_layer = score_val.shape[1] * n_kv_heads * ctx_len  # bsz * heads * ctx
+            n_tokens_per_layer = score_val.shape[1] * n_kv_heads * ctx_len
             n_pruned_layers = torch.bincount(pruned_flat // n_tokens_per_layer, minlength=n_layers).int()
             
             for li in range(n_layers):
                 n_p = n_pruned_layers[li].item()
                 if n_p > 0:
-                    scores_li = score_val[li]  # [1, n_kv_heads, ctx_len]
+                    scores_li = score_val[li]
                     indices = torch.topk(-scores_li.reshape(1, -1), n_p, dim=1).indices.flatten()
                     head_idx = indices // ctx_len
                     seq_idx = indices % ctx_len
-                    cache_copy.layers[li].keys[0, head_idx, seq_idx] = 0
-                    cache_copy.layers[li].values[0, head_idx, seq_idx] = 0
+                    
+                    # Save original values
+                    saved_k = base_cache.layers[li].keys[0, head_idx, seq_idx].clone()
+                    saved_v = base_cache.layers[li].values[0, head_idx, seq_idx].clone()
+                    saved_kv.append((li, head_idx, seq_idx, saved_k, saved_v))
+                    
+                    # Zero out
+                    base_cache.layers[li].keys[0, head_idx, seq_idx] = 0
+                    base_cache.layers[li].values[0, head_idx, seq_idx] = 0
+        
+        # Remember original cache length (generation adds to cache)
+        orig_cache_len = base_cache.get_seq_length()
         
         # Generate from compressed cache
         generated = [first_token.item()]
         next_token = first_token
         with torch.no_grad():
             for _ in range(max_new - 1):
-                out_step = model(input_ids=next_token, past_key_values=cache_copy, use_cache=True)
+                out_step = model(input_ids=next_token, past_key_values=base_cache, use_cache=True)
                 next_token = out_step.logits[:, -1, :].argmax(dim=-1, keepdim=True)
                 if next_token.item() == tokenizer.eos_token_id:
                     break
@@ -365,9 +373,19 @@ for idx_i, sample_idx in enumerate(selected):
             "gen": gen_text[:200],
         })
         
-        del cache_copy
+        # Restore evicted KVs
+        for li, head_idx, seq_idx, saved_k, saved_v in saved_kv:
+            base_cache.layers[li].keys[0, head_idx, seq_idx] = saved_k
+            base_cache.layers[li].values[0, head_idx, seq_idx] = saved_v
+        
+        # Trim cache back to original length (remove generated tokens)
+        cur_len = base_cache.get_seq_length()
+        if cur_len > orig_cache_len:
+            for li in range(n_layers):
+                base_cache.layers[li].keys = base_cache.layers[li].keys[:, :, :orig_cache_len, :]
+                base_cache.layers[li].values = base_cache.layers[li].values[:, :, :orig_cache_len, :]
     
-    del base_cache, score_val, press
+    del score_val, press
     torch.cuda.empty_cache()
 
     elapsed = time.time() - t0
