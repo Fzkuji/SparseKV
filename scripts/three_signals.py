@@ -103,18 +103,19 @@ def generate_with_cache(cache, out, max_new_tokens):
 
 
 def compute_scores_via_hooks(model, input_ids, scores_out, target_range, q_start=0,
-                              position_ids=None, past_key_values=None):
+                              position_ids=None, past_key_values=None,
+                              subsampled=False, n_sink=4):
     """
     Run forward pass with hooks that compute attention scores efficiently.
     
-    For each layer, we extract Q and K from the attention module, compute
-    attention scores only for the target KV range, and aggregate with amax.
-    This avoids materializing the full [q_len, kv_len] attention matrix.
+    For each layer, we extract Q and K, compute attention scores for target KV range.
     
     Args:
         scores_out: [n_layers, n_kv_heads, target_len] tensor to accumulate max scores into
         target_range: (start, end) KV positions to score
         q_start: only use query tokens from this position onward
+        subsampled: if True, use KVzip-style subsampled softmax (sink + target + query tokens only)
+        n_sink: number of sink tokens to include in subsampled softmax
     """
     t_start, t_end = target_range
     hooks = []
@@ -128,7 +129,6 @@ def compute_scores_via_hooks(model, input_ids, scores_out, target_range, q_start
             pe = kwargs.get("position_embeddings", None) if kwargs else None
             
             with torch.no_grad():
-                # Get Q for query tokens only (from q_start)
                 q = module.q_proj(hs).view(bsz, sl, n_q_heads, head_dim).transpose(1, 2)
                 k = module.k_proj(hs).view(bsz, sl, n_kv_heads, head_dim).transpose(1, 2)
                 
@@ -137,81 +137,79 @@ def compute_scores_via_hooks(model, input_ids, scores_out, target_range, q_start
                     q = apply_rotary(q, cos.unsqueeze(1), sin.unsqueeze(1))
                     k = apply_rotary(k, cos.unsqueeze(1), sin.unsqueeze(1))
                 
-                # If using cache, we need the cached K for target range
                 if past_key_values is not None and past_key_values.get_seq_length() > 0:
-                    # K from cache for target positions
-                    cached_k = past_key_values.layers[li].keys  # [1, n_kv_heads, cache_len, head_dim]
-                    k_target = cached_k[:, :, t_start:t_end, :]  # [1, n_kv_heads, target_len, head_dim]
-                    # Q: use all new query tokens (they attend to cache + self)
-                    q_use = q[:, :, q_start:, :]  # [1, n_q_heads, q_len_use, head_dim]
+                    cached_k = past_key_values.layers[li].keys
+                    q_use = q[:, :, q_start:, :]
                 else:
-                    # No cache — K is from the same input
-                    k_target = k[:, :, t_start:t_end, :]
+                    cached_k = None
                     q_use = q[:, :, q_start:, :]
                 
-                # Compute attention scores per KV group
                 for g in range(n_kv_heads):
                     qh = slice(g * n_groups, (g + 1) * n_groups)
                     q_g = q_use[0, qh]  # [n_groups, q_len, head_dim]
-                    k_g = k_target[0, g]  # [target_len, head_dim]
                     
-                    # [n_groups, q_len, target_len]
-                    logits = torch.matmul(q_g, k_g.transpose(-1, -2)) / scale
-                    
-                    # Apply causal mask if no cache (prefill mode)
-                    if past_key_values is None or past_key_values.get_seq_length() == 0:
-                        q_positions = torch.arange(q_start, sl, device=device)
-                        k_positions = torch.arange(t_start, t_end, device=device)
-                        # mask where k_pos > q_pos (future tokens)
-                        causal = k_positions.unsqueeze(0) > q_positions.unsqueeze(1)
-                        logits.masked_fill_(causal.unsqueeze(0), float('-inf'))
-                    
-                    # We need softmax over ALL K positions, not just target.
-                    # But we only have logits for target range. This is a problem.
-                    # 
-                    # KVzip solution: they compute full softmax then slice.
-                    # We need to compute full attention for the query tokens.
-                    # To save memory, compute full logits but only store target scores.
-                    
-                    # Get full K (cache + current)
-                    if past_key_values is not None and past_key_values.get_seq_length() > 0:
-                        full_k = torch.cat([cached_k[0, g:g+1], k[0, g:g+1]], dim=1)
+                    if subsampled and cached_k is not None:
+                        # KVzip-style: softmax only over sink + target_chunk + new_query_tokens
+                        sink_end = min(n_sink, t_start)
+                        k_sink = cached_k[0, g, :sink_end]      # [sink, head_dim]
+                        k_chunk = cached_k[0, g, t_start:t_end]  # [chunk_len, head_dim]
+                        k_new = k[0, g]                           # [sl, head_dim] (repeat tokens)
+                        
+                        k_sub = torch.cat([k_sink, k_chunk, k_new], dim=0)  # [sink+chunk+sl, hd]
+                        k_sub = k_sub.unsqueeze(0).expand(n_groups, -1, -1)
+                        
+                        logits = torch.matmul(q_g, k_sub.transpose(-1, -2)) / scale
+                        
+                        # Causal mask for new tokens among themselves
+                        sub_len = k_sub.shape[1]
+                        q_len_use = q_g.shape[1]
+                        new_start = sink_end + (t_end - t_start)  # where new tokens start in sub
+                        if q_len_use > 1:
+                            q_pos = torch.arange(q_len_use, device=device)
+                            new_k_pos = torch.arange(sl, device=device)
+                            causal_new = new_k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
+                            logits[:, :, new_start:].masked_fill_(causal_new.unsqueeze(0), float('-inf'))
+                        
+                        attn = torch.softmax(logits.float(), dim=-1)
+                        
+                        # Extract target chunk portion (after sink, before new tokens)
+                        attn_target = attn[:, :, sink_end:sink_end + (t_end - t_start)]
+                        
+                        score = attn_target.amax(dim=(0, 1))
+                        scores_out[li, g] = torch.max(scores_out[li, g], score.cpu())
+                        
+                        del k_sub, logits, attn, attn_target
                     else:
-                        full_k = k[0, g:g+1]  # [1, total_kv, head_dim]
-                    
-                    full_k = full_k.expand(n_groups, -1, -1)
-                    full_logits = torch.matmul(q_g, full_k.transpose(-1, -2)) / scale
-                    
-                    # Causal mask for full logits
-                    total_kv = full_k.shape[1]
-                    q_len_use = q_g.shape[1]
-                    if past_key_values is None or past_key_values.get_seq_length() == 0:
-                        q_pos = torch.arange(q_start, sl, device=device)
-                        k_pos = torch.arange(total_kv, device=device)
-                        causal_full = k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
-                        full_logits.masked_fill_(causal_full.unsqueeze(0), float('-inf'))
-                    # With cache: all cache positions are "past", no masking needed for cache;
-                    # new tokens need causal among themselves
-                    elif q_len_use > 1:
-                        cache_len = past_key_values.get_seq_length()
-                        # Only mask among new tokens (cache positions always visible)
-                        q_pos = torch.arange(q_len_use, device=device)
-                        new_k_pos = torch.arange(q_len_use, device=device)
-                        causal_new = new_k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
-                        full_logits[:, :, cache_len:].masked_fill_(causal_new.unsqueeze(0), float('-inf'))
-                    
-                    # Softmax over all KV positions
-                    attn = torch.softmax(full_logits.float(), dim=-1)  # [n_groups, q_len, total_kv]
-                    
-                    # Extract target range attention
-                    attn_target = attn[:, :, t_start:t_end]  # [n_groups, q_len, target_len]
-                    
-                    # Max over groups and query positions
-                    score = attn_target.amax(dim=(0, 1))  # [target_len]
-                    
-                    scores_out[li, g] = torch.max(scores_out[li, g], score.cpu())
-                    
-                    del logits, full_logits, attn, attn_target, full_k
+                        # Full softmax mode (for QA scoring during prefill)
+                        if cached_k is not None:
+                            full_k = torch.cat([cached_k[0, g:g+1], k[0, g:g+1]], dim=1)
+                        else:
+                            full_k = k[0, g:g+1]
+                        
+                        full_k = full_k.expand(n_groups, -1, -1)
+                        full_logits = torch.matmul(q_g, full_k.transpose(-1, -2)) / scale
+                        
+                        total_kv = full_k.shape[1]
+                        q_len_use = q_g.shape[1]
+                        if cached_k is None:
+                            q_pos = torch.arange(q_start, sl, device=device)
+                            k_pos = torch.arange(total_kv, device=device)
+                            causal_full = k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
+                            full_logits.masked_fill_(causal_full.unsqueeze(0), float('-inf'))
+                        elif q_len_use > 1:
+                            cache_len = past_key_values.get_seq_length()
+                            q_pos = torch.arange(q_len_use, device=device)
+                            new_k_pos = torch.arange(q_len_use, device=device)
+                            causal_new = new_k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
+                            full_logits[:, :, cache_len:].masked_fill_(causal_new.unsqueeze(0), float('-inf'))
+                        
+                        attn = torch.softmax(full_logits.float(), dim=-1)
+                        attn_target = attn[:, :, t_start:t_end]
+                        
+                        score = attn_target.amax(dim=(0, 1))
+                        scores_out[li, g] = torch.max(scores_out[li, g], score.cpu())
+                        
+                        del full_logits, attn, attn_target, full_k
                 del q, k
         return hook_fn
     
@@ -326,6 +324,7 @@ for idx_i, sample_idx in enumerate(selected):
             model, query_ids, recons_scores[:, :, c_start:c_end],
             target_range=(c_start, c_end), q_start=0,
             position_ids=position_ids, past_key_values=cache_for_recons,
+            subsampled=True, n_sink=SINK,
         )
         
         del cache_for_recons
