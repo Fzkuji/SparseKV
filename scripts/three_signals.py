@@ -1,10 +1,13 @@
 """
 Compare 2 KV importance scoring methods across eviction ratios on RULER.
-- QA: attention from question+answer_prefix tokens to context (max over queries & groups)
+- QA: attention from question tokens to context (max over queries & groups)
 - Recons: KVzip-style reconstruction — append "Repeat the previous context exactly",
   do chunked forward passes, collect max attention to each context KV position.
 
-Both use `amax(dim=(-3,-2))` following Fast KVzip (arXiv 2601.17668).
+Both use `amax` over (groups, query_positions) following Fast KVzip (arXiv 2601.17668).
+
+Memory-efficient: uses hooks to compute QK attention scores one KV-group at a time,
+never materializing the full attention matrix.
 
 Usage:
     python -u scripts/three_signals.py [--model MODEL] [--n_samples N] [--output PATH]
@@ -13,7 +16,10 @@ import torch, numpy as np, json, random, copy, os, argparse, time, math
 from collections import defaultdict
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
-from transformers.models.llama.modeling_llama import rotate_half
+from transformers.models.qwen3.modeling_qwen3 import rotate_half as _rotate_half
+
+def apply_rotary(x, cos, sin):
+    return (x * cos) + (_rotate_half(x) * sin)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", default="Qwen/Qwen3-8B")
@@ -36,8 +42,7 @@ print(f"Reconstruction chunk size: {RECONS_CHUNK}")
 
 print("Loading model...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
-model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float16, device_map="cuda",
-                                              attn_implementation="eager")
+model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float16, device_map="cuda")
 model.eval()
 device = model.device
 
@@ -66,7 +71,6 @@ selected.sort()
 print(f"Selected {len(selected)} samples from {n_tasks} tasks ({per_task} per task)")
 
 
-# Scoring functions
 def string_match_all(pred, ans):
     p = pred.lower()
     return all(str(a).lower() in p for a in ans)
@@ -85,7 +89,6 @@ TASK_SCORERS["qa_2"] = string_match_part
 
 
 def generate_with_cache(cache, out, max_new_tokens):
-    """Greedy generation from existing cache."""
     generated = []
     next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     generated.append(next_token.item())
@@ -99,47 +102,136 @@ def generate_with_cache(cache, out, max_new_tokens):
     return tokenizer.decode(generated, skip_special_tokens=True)
 
 
-def compute_attention_scores(input_ids, position_ids=None, past_key_values=None,
-                             target_range=None):
+def compute_scores_via_hooks(model, input_ids, scores_out, target_range, q_start=0,
+                              position_ids=None, past_key_values=None):
     """
-    Run a forward pass and collect attention scores for context KV positions.
+    Run forward pass with hooks that compute attention scores efficiently.
+    
+    For each layer, we extract Q and K from the attention module, compute
+    attention scores only for the target KV range, and aggregate with amax.
+    This avoids materializing the full [q_len, kv_len] attention matrix.
     
     Args:
-        input_ids: [1, seq_len] query tokens
-        position_ids: [1, seq_len] position ids (for correct RoPE with cache)
-        past_key_values: DynamicCache with context KVs
-        target_range: (start, end) — which KV positions to score (in the cache)
-    
-    Returns:
-        scores: [n_layers, n_kv_heads, target_len] — max attention from query tokens
-                to each target KV position, max over query positions and groups.
+        scores_out: [n_layers, n_kv_heads, target_len] tensor to accumulate max scores into
+        target_range: (start, end) KV positions to score
+        q_start: only use query tokens from this position onward
     """
-    # We need eager attention to get attention weights
-    with torch.no_grad():
-        out = model(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            use_cache=True,
-            output_attentions=True,
-        )
-    
     t_start, t_end = target_range
-    target_len = t_end - t_start
-    scores = torch.zeros(n_layers, n_kv_heads, target_len)
+    hooks = []
     
-    for li in range(n_layers):
-        # attn_weights shape: [bsz, n_q_heads, q_len, kv_len]
-        attn = out.attentions[li]  # [1, n_q_heads, q_len, total_kv_len]
-        # Reshape to [bsz, n_kv_heads, n_groups, q_len, kv_len]
-        attn = attn.view(1, n_kv_heads, n_groups, attn.shape[2], attn.shape[3])
-        # Extract target range
-        attn_target = attn[:, :, :, :, t_start:t_end]  # [1, n_kv_heads, n_groups, q_len, target_len]
-        # Max over groups and query positions → [1, n_kv_heads, target_len]
-        layer_scores = attn_target.amax(dim=(-3, -2))  # max over (groups, q_len)
-        scores[li] = layer_scores[0].cpu()
+    def make_hook(li):
+        def hook_fn(module, args, kwargs, output):
+            hs = kwargs.get("hidden_states", args[0] if args else None)
+            if hs is None:
+                return
+            bsz, sl, _ = hs.shape
+            pe = kwargs.get("position_embeddings", None) if kwargs else None
+            
+            with torch.no_grad():
+                # Get Q for query tokens only (from q_start)
+                q = module.q_proj(hs).view(bsz, sl, n_q_heads, head_dim).transpose(1, 2)
+                k = module.k_proj(hs).view(bsz, sl, n_kv_heads, head_dim).transpose(1, 2)
+                
+                if pe is not None:
+                    cos, sin = pe
+                    q = apply_rotary(q, cos.unsqueeze(1), sin.unsqueeze(1))
+                    k = apply_rotary(k, cos.unsqueeze(1), sin.unsqueeze(1))
+                
+                # If using cache, we need the cached K for target range
+                if past_key_values is not None and past_key_values.get_seq_length() > 0:
+                    # K from cache for target positions
+                    cached_k = past_key_values.layers[li].keys  # [1, n_kv_heads, cache_len, head_dim]
+                    k_target = cached_k[:, :, t_start:t_end, :]  # [1, n_kv_heads, target_len, head_dim]
+                    # Q: use all new query tokens (they attend to cache + self)
+                    q_use = q[:, :, q_start:, :]  # [1, n_q_heads, q_len_use, head_dim]
+                else:
+                    # No cache — K is from the same input
+                    k_target = k[:, :, t_start:t_end, :]
+                    q_use = q[:, :, q_start:, :]
+                
+                # Compute attention scores per KV group
+                for g in range(n_kv_heads):
+                    qh = slice(g * n_groups, (g + 1) * n_groups)
+                    q_g = q_use[0, qh]  # [n_groups, q_len, head_dim]
+                    k_g = k_target[0, g]  # [target_len, head_dim]
+                    
+                    # [n_groups, q_len, target_len]
+                    logits = torch.matmul(q_g, k_g.transpose(-1, -2)) / scale
+                    
+                    # Apply causal mask if no cache (prefill mode)
+                    if past_key_values is None or past_key_values.get_seq_length() == 0:
+                        q_positions = torch.arange(q_start, sl, device=device)
+                        k_positions = torch.arange(t_start, t_end, device=device)
+                        # mask where k_pos > q_pos (future tokens)
+                        causal = k_positions.unsqueeze(0) > q_positions.unsqueeze(1)
+                        logits.masked_fill_(causal.unsqueeze(0), float('-inf'))
+                    
+                    # We need softmax over ALL K positions, not just target.
+                    # But we only have logits for target range. This is a problem.
+                    # 
+                    # KVzip solution: they compute full softmax then slice.
+                    # We need to compute full attention for the query tokens.
+                    # To save memory, compute full logits but only store target scores.
+                    
+                    # Get full K (cache + current)
+                    if past_key_values is not None and past_key_values.get_seq_length() > 0:
+                        full_k = torch.cat([cached_k[0, g:g+1], k[0, g:g+1]], dim=1)
+                    else:
+                        full_k = k[0, g:g+1]  # [1, total_kv, head_dim]
+                    
+                    full_k = full_k.expand(n_groups, -1, -1)
+                    full_logits = torch.matmul(q_g, full_k.transpose(-1, -2)) / scale
+                    
+                    # Causal mask for full logits
+                    total_kv = full_k.shape[1]
+                    q_len_use = q_g.shape[1]
+                    if past_key_values is None or past_key_values.get_seq_length() == 0:
+                        q_pos = torch.arange(q_start, sl, device=device)
+                        k_pos = torch.arange(total_kv, device=device)
+                        causal_full = k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
+                        full_logits.masked_fill_(causal_full.unsqueeze(0), float('-inf'))
+                    # With cache: all cache positions are "past", no masking needed for cache;
+                    # new tokens need causal among themselves
+                    elif q_len_use > 1:
+                        cache_len = past_key_values.get_seq_length()
+                        # Only mask among new tokens (cache positions always visible)
+                        q_pos = torch.arange(q_len_use, device=device)
+                        new_k_pos = torch.arange(q_len_use, device=device)
+                        causal_new = new_k_pos.unsqueeze(0) > q_pos.unsqueeze(1)
+                        full_logits[:, :, cache_len:].masked_fill_(causal_new.unsqueeze(0), float('-inf'))
+                    
+                    # Softmax over all KV positions
+                    attn = torch.softmax(full_logits.float(), dim=-1)  # [n_groups, q_len, total_kv]
+                    
+                    # Extract target range attention
+                    attn_target = attn[:, :, t_start:t_end]  # [n_groups, q_len, target_len]
+                    
+                    # Max over groups and query positions
+                    score = attn_target.amax(dim=(0, 1))  # [target_len]
+                    
+                    scores_out[li, g] = torch.max(scores_out[li, g], score.cpu())
+                    
+                    del logits, full_logits, attn, attn_target, full_k
+                del q, k
+        return hook_fn
     
-    return scores
+    for layer in model.model.layers:
+        li = int(layer.self_attn.layer_idx)
+        hooks.append(layer.self_attn.register_forward_hook(make_hook(li), with_kwargs=True))
+    
+    kwargs = {}
+    if position_ids is not None:
+        kwargs["position_ids"] = position_ids
+    if past_key_values is not None:
+        kwargs["past_key_values"] = past_key_values
+    
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=True, **kwargs)
+    
+    for h in hooks:
+        h.remove()
+    
+    return out
 
 
 # Main loop
@@ -156,7 +248,6 @@ for idx_i, sample_idx in enumerate(selected):
     max_new = ex["max_new_tokens"]
     scorer = TASK_SCORERS[task]
 
-    # Build full prompt (context + question)
     prompt = f"{context}\n\n{question}\n{answer_prefix}"
     full_text = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
@@ -166,46 +257,28 @@ for idx_i, sample_idx in enumerate(selected):
                                   add_special_tokens=False).to(device)
     L = prompt_ids.shape[1]
 
-    # Find context boundary (everything before question)
     q_text = f"\n\n{question}\n{answer_prefix}"
     q_only_ids = tokenizer.encode(q_text, add_special_tokens=False)
     q_len = len(q_only_ids)
-    ctx_end = L - q_len  # context tokens: [0, ctx_end)
+    ctx_end = L - q_len
 
-    # ================================================================
-    # Step 1: Prefill — get full cache + QA scores via output_attentions
-    # ================================================================
-    with torch.no_grad():
-        out = model(input_ids=prompt_ids, use_cache=True, output_attentions=True,
-                    past_key_values=DynamicCache())
-
-    # Extract QA scores: attention from question tokens to context positions
-    # Question tokens are the last q_len tokens of the prompt
-    # Target: context KV positions [SINK, ctx_end)
     middle_start = SINK
     middle_end = max(SINK, min(ctx_end, L - RECENT))
     n_middle = middle_end - middle_start
 
+    # ================================================================
+    # Step 1: Prefill + QA scoring (hooks compute scores during forward)
+    # ================================================================
     qa_scores = torch.zeros(n_layers, n_kv_heads, L)
-    for li in range(n_layers):
-        attn = out.attentions[li]  # [1, n_q_heads, L, L]
-        # Question tokens attend to all positions
-        # attn[:, :, -q_len:, :] = attention FROM question tokens TO all KV positions
-        qa_attn = attn[:, :, -q_len:, :]  # [1, n_q_heads, q_len, L]
-        qa_attn = qa_attn.view(1, n_kv_heads, n_groups, q_len, L)
-        # Max over groups and query positions
-        qa_scores_layer = qa_attn.amax(dim=(-3, -2))  # [1, L]
-        qa_scores[li] = qa_scores_layer[0].cpu()
-
-    # Get cache from the output (without attentions stored)
+    out = compute_scores_via_hooks(
+        model, prompt_ids, qa_scores,
+        target_range=(0, L), q_start=L - q_len,
+    )
     cache = out.past_key_values
-    
-    # Free attention tensors
-    del out.attentions
     torch.cuda.empty_cache()
 
     # ================================================================
-    # Step 2: Full KV baseline generation
+    # Step 2: Full KV baseline
     # ================================================================
     cache_full = copy.deepcopy(cache)
     gen_full = generate_with_cache(cache_full, out, max_new)
@@ -218,16 +291,10 @@ for idx_i, sample_idx in enumerate(selected):
     })
 
     # ================================================================
-    # Step 3: Reconstruction scoring (KVzip-style)
-    # Build "Repeat the previous context exactly" query, chunked forward
+    # Step 3: Reconstruction scoring (KVzip-style chunked)
     # ================================================================
     recons_scores = torch.zeros(n_layers, n_kv_heads, L)
     
-    # Build context token ids for chunking (just the context portion)
-    # Context is prompt_ids[0, :ctx_end]
-    ctx_ids = prompt_ids[0, :ctx_end]  # [ctx_end]
-    
-    # Chunk the context
     chunk_size = RECONS_CHUNK
     n_chunks = max(1, (ctx_end + chunk_size - 1) // chunk_size)
     
@@ -235,11 +302,9 @@ for idx_i, sample_idx in enumerate(selected):
         c_start = ci * chunk_size
         c_end = min((ci + 1) * chunk_size, ctx_end)
         
-        # Build repeat query
         if ci == 0:
             repeat_prompt = "\n\nRepeat the previous context exactly."
         else:
-            # Include last 8 tokens of previous chunk as hint
             prev_end = ci * chunk_size
             prev_start = max(0, prev_end - 8)
             hint_ids = prompt_ids[0, prev_start:prev_end]
@@ -248,51 +313,26 @@ for idx_i, sample_idx in enumerate(selected):
         
         repeat_ids = tokenizer.encode(repeat_prompt, return_tensors="pt",
                                        add_special_tokens=False).to(device)
-        
-        # The chunk's ground-truth tokens (what should be repeated)
-        chunk_ids = prompt_ids[:, c_start:c_end]  # [1, chunk_len]
-        
-        # Concatenate: [repeat_query, chunk_answer]
-        # This simulates the model being asked to repeat, then "generating" the chunk
-        query_ids = torch.cat([repeat_ids, chunk_ids], dim=1)  # [1, repeat_len + chunk_len]
+        chunk_ids = prompt_ids[:, c_start:c_end]
+        query_ids = torch.cat([repeat_ids, chunk_ids], dim=1)
         q_total_len = query_ids.shape[1]
         
-        # We need to run this query against the existing KV cache (context)
-        # Position ids continue from where the cache ends
         cache_for_recons = copy.deepcopy(cache)
         pos_start = cache_for_recons.get_seq_length()
         position_ids = torch.arange(pos_start, pos_start + q_total_len,
                                     device=device).unsqueeze(0)
         
-        with torch.no_grad():
-            recons_out = model(
-                input_ids=query_ids,
-                position_ids=position_ids,
-                past_key_values=cache_for_recons,
-                use_cache=False,  # don't need to extend cache
-                output_attentions=True,
-            )
+        compute_scores_via_hooks(
+            model, query_ids, recons_scores[:, :, c_start:c_end],
+            target_range=(c_start, c_end), q_start=0,
+            position_ids=position_ids, past_key_values=cache_for_recons,
+        )
         
-        # Extract scores: attention from query tokens to context KV positions [c_start, c_end)
-        for li in range(n_layers):
-            attn = recons_out.attentions[li]  # [1, n_q_heads, q_total_len, cache_len + q_total_len]
-            # We want attention to the original cache positions [c_start, c_end)
-            attn_chunk = attn[:, :, :, c_start:c_end]  # [1, n_q_heads, q_total_len, chunk_len]
-            attn_chunk = attn_chunk.view(1, n_kv_heads, n_groups, q_total_len, c_end - c_start)
-            # Max over groups and query positions
-            # attn_chunk: [1, n_kv_heads, n_groups, q_total_len, chunk_len]
-            # amax over dim -3 (groups) and -2 (q_positions) → [1, n_kv_heads, chunk_len]
-            chunk_scores = attn_chunk.amax(dim=(-3, -2))  # [1, n_kv_heads, chunk_len]
-            recons_scores[li, :, c_start:c_end] = torch.max(
-                recons_scores[li, :, c_start:c_end],
-                chunk_scores[0].cpu()  # [n_kv_heads, chunk_len]
-            )
-        
-        del recons_out, cache_for_recons
+        del cache_for_recons
         torch.cuda.empty_cache()
 
     # ================================================================
-    # Step 4: Evict and evaluate for each method × ratio
+    # Step 4: Evict and evaluate
     # ================================================================
     methods = {"qa": qa_scores, "recons": recons_scores}
     for method_name, scores in methods.items():
@@ -339,7 +379,6 @@ for idx_i, sample_idx in enumerate(selected):
     status = "OK" if full_correct else "FAIL(fullkv)"
     print(f"[{idx_i+1}/{len(selected)}] {task:>20} fullkv={status}  elapsed={elapsed/60:.1f}m  ETA={eta/60:.1f}m")
 
-    # Running summary every 10 samples
     if (idx_i + 1) % 10 == 0:
         print(f"\n--- Progress: {idx_i+1}/{len(selected)} ---")
         for method in ["qa", "recons"]:
@@ -353,18 +392,15 @@ for idx_i, sample_idx in enumerate(selected):
             print(f"  {method:>8}: {' | '.join(row)}")
         print()
 
-        # Save intermediate
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"  (intermediate save to {args.output})")
 
 
-# ============================================================
 # Final Summary
-# ============================================================
 print(f"\n{'='*90}")
-print(f"FINAL RESULTS: Accuracy by Method × Eviction Ratio")
+print(f"FINAL RESULTS")
 print(f"{'='*90}")
 print(f"{'Method':>10}", end="")
 for ratio in EVICT_RATIOS:
@@ -386,15 +422,12 @@ for method in ["full_kv", "qa", "recons"]:
             print(f" {acc:>9.1f}%", end="")
     print()
 
-# Per-task breakdown
 print(f"\n{'='*90}")
 print(f"PER-TASK BREAKDOWN")
 print(f"{'='*90}")
-
 for task in sorted(set(r["task"] for r in results)):
     fk = [r for r in results if r["task"] == task and r["method"] == "full_kv"]
     fk_acc = sum(r["correct"] for r in fk) / len(fk) * 100 if fk else 0
-
     print(f"\n  {task} (FullKV={fk_acc:.0f}%):")
     for method in ["qa", "recons"]:
         row = []
@@ -408,7 +441,6 @@ for task in sorted(set(r["task"] for r in results)):
                 row.append("  N/A")
         print(f"    {method:>8}: {' | '.join(row)}")
 
-# Save
 os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 with open(args.output, "w") as f:
     json.dump(results, f, indent=2)
