@@ -90,7 +90,7 @@ tokenizer = pipe.tokenizer
 model = pipe.model
 
 # --- Load LongBench ---
-ds = load_dataset("THUDM/LongBench", DATASET, split="test")
+ds = load_dataset("THUDM/LongBench", DATASET, split="test", trust_remote_code=True)
 print(f"Dataset size: {len(ds)}")
 
 random.seed(42)
